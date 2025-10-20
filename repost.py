@@ -10,8 +10,6 @@ import pytz
 API_ID = 28881388
 API_HASH = 'd9e8b04bb4a85f373cc9ba4692dd6cf4'
 PHONE_NUMBER = '+5541988405232'  # Substitua pelo seu número de telefone
-TWO_FA_PASSWORD = 'Isadora44'  # Senha 2FA, se houver
-
 # =================== PARES DE CANAIS ===================
 donor_recipient_pairs = {
     -1002957443418: -1002646886211,  # Doador -> Receptor
