@@ -57,60 +57,51 @@ async def get_messages(donor_id):
 
 
 async def send_message_safe(message, recipient_id, all_messages):
-    """Tenta encaminhar e, se falhar, reenvia manualmente (suporta álbuns)."""
+    """Envia mensagens SEM mostrar 'Forwarded from'."""
     try:
-        # Tentativa 1: encaminhar diretamente
-        await client.forward_messages(recipient_id, message)
-        print("📤 Mensagem encaminhada com sucesso!")
+        # Se for álbum (grouped_id)
+        if message.grouped_id:
+            grouped = [
+                m for m in all_messages
+                if m.grouped_id == message.grouped_id
+            ]
+            media_files = []
+            for m in grouped:
+                if m.media:
+                    path = await m.download_media()
+                    media_files.append((path, m.text or ""))
+
+            await client.send_file(
+                recipient_id,
+                [f for f, _ in media_files],
+                caption=grouped[0].text or "",
+                parse_mode="html"
+            )
+
+            for f, _ in media_files:
+                os.remove(f)
+
+        # Se for mídia única
+        elif message.media:
+            file_path = await message.download_media()
+            await client.send_file(
+                recipient_id,
+                file_path,
+                caption=message.text or "",
+                parse_mode="html"
+            )
+            os.remove(file_path)
+
+        # Se for apenas texto
+        elif message.text:
+            await client.send_message(recipient_id, message.text, parse_mode="html")
+
+        print("✅ Mensagem enviada (sem encaminhamento)!")
         return True
 
-    except Exception as e:
-        print(f"⚠️ Falha ao encaminhar ({e}), tentando envio manual...")
-
-        try:
-            # Se for álbum (grouped_id)
-            if message.grouped_id:
-                grouped = [
-                    m for m in all_messages
-                    if m.grouped_id == message.grouped_id
-                ]
-                media_files = []
-                for m in grouped:
-                    if m.media:
-                        path = await m.download_media()
-                        media_files.append((path, m.text or ""))
-
-                await client.send_file(
-                    recipient_id,
-                    [f for f, _ in media_files],
-                    caption=grouped[0].text or "",
-                    parse_mode="html"
-                )
-
-                for f, _ in media_files:
-                    os.remove(f)
-
-            # Se for mídia única
-            elif message.media:
-                file_path = await message.download_media()
-                await client.send_file(
-                    recipient_id,
-                    file_path,
-                    caption=message.text or "",
-                    parse_mode="html"
-                )
-                os.remove(file_path)
-
-            # Se for apenas texto
-            elif message.text:
-                await client.send_message(recipient_id, message.text, parse_mode="html")
-
-            print("✅ Mensagem enviada manualmente!")
-            return True
-
-        except Exception as ex:
-            print(f"❌ Erro ao enviar manualmente: {ex}")
-            return False
+    except Exception as ex:
+        print(f"❌ Erro ao enviar mensagem: {ex}")
+        return False
 
 
 async def bot_loop():
