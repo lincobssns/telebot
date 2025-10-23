@@ -23,8 +23,8 @@ class TelegramRepostBot:
         self.password = 'Isadora44'
         
         # Canais
-        self.donor_channel = -1002877945842
-        self.target_channel = -1002760356238
+        self.donor_channel = -1003106957508
+        self.target_channel = -1003135697010
         
         # Intervalos
         self.min_interval = 1800  # 30 minutos
