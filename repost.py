@@ -65,7 +65,7 @@ class TelegramRepostBot:
             return False
 
     def is_media_message(self, message):
-        """Verifica se a mensagem contém mídia (imagem, vídeo, documento)"""
+        """Verifica se a mensagem contém mídia"""
         if not message:
             return False
         
@@ -73,7 +73,7 @@ class TelegramRepostBot:
         if hasattr(message, 'media') and message.media:
             return True
         
-        # Verifica se é foto, vídeo, documento, sticker, etc.
+        # Verifica tipos específicos de mídia
         if (hasattr(message, 'photo') and message.photo or
             hasattr(message, 'video') and message.video or
             hasattr(message, 'document') and message.document or
@@ -83,7 +83,7 @@ class TelegramRepostBot:
         return False
 
     async def get_available_media_messages(self):
-        """Coleta apenas mensagens com mídia/imagens"""
+        """Coleta apenas mensagens com mídia"""
         try:
             logger.info(f"🔍 Coletando MÍDIAS do canal {self.donor_channel}")
             media_messages = []
@@ -93,17 +93,77 @@ class TelegramRepostBot:
                     msg_id = f"{message.id}_{self.donor_channel}"
                     if msg_id not in self.sent_messages:
                         media_messages.append((message, msg_id))
-                        logger.info(f"📸 Mídia encontrada: ID {message.id}")
             
-            logger.info(f"🎯 {len(media_messages)} mídias disponíveis para envio")
+            logger.info(f"🎯 {len(media_messages)} mídias disponíveis")
             return media_messages
             
         except Exception as e:
             logger.error(f"❌ Erro ao coletar mídias: {e}")
             return []
 
+    async def download_and_send_media(self, message):
+        """Baixa e reenvia a mídia (sem forward)"""
+        try:
+            # Baixa a mídia
+            file_path = await message.download_media()
+            
+            if not file_path:
+                logger.error("❌ Não foi possível baixar a mídia")
+                return False
+            
+            # Envia a mídia como nova mensagem
+            if message.photo:
+                # É uma foto
+                await self.client.send_file(
+                    self.target_channel,
+                    file_path,
+                    caption=""
+                )
+            elif message.video:
+                # É um vídeo
+                await self.client.send_file(
+                    self.target_channel,
+                    file_path,
+                    caption="",
+                    supports_streaming=True
+                )
+            elif message.document:
+                # É um documento
+                await self.client.send_file(
+                    self.target_channel,
+                    file_path,
+                    caption=""
+                )
+            elif message.sticker:
+                # É um sticker
+                await self.client.send_file(
+                    self.target_channel,
+                    file_path,
+                    caption=""
+                )
+            else:
+                # Outro tipo de mídia
+                await self.client.send_file(
+                    self.target_channel,
+                    file_path,
+                    caption=""
+                )
+            
+            # Limpa o arquivo baixado
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar mídia: {e}")
+            # Limpa o arquivo em caso de erro
+            if 'file_path' in locals() and os.path.exists(file_path):
+                os.remove(file_path)
+            return False
+
     async def send_random_media(self):
-        """Envia uma mídia aleatória"""
+        """Envia uma mídia aleatória (sem forward)"""
         available_media = await self.get_available_media_messages()
         
         if not available_media:
@@ -112,27 +172,28 @@ class TelegramRepostBot:
             available_media = await self.get_available_media_messages()
             
             if not available_media:
-                logger.warning("📭 Nenhuma mídia disponível no canal")
+                logger.warning("📭 Nenhuma mídia disponível")
                 return False
 
         # Seleciona mídia aleatória
         message, msg_id = random.choice(available_media)
         
         try:
-            logger.info(f"📤 Enviando mídia ID {message.id}...")
+            logger.info(f"📤 Enviando mídia ID {message.id} (sem forward)...")
             
-            # Encaminha a mensagem com mídia
-            await self.client.forward_messages(self.target_channel, [message])
+            # Envia a mídia como nova mensagem (não encaminha)
+            success = await self.download_and_send_media(message)
             
-            self.sent_messages.add(msg_id)
-            logger.info(f"✅ Mídia enviada com sucesso!")
-            logger.info(f"   📊 Total de mídias enviadas: {len(self.sent_messages)}")
-            logger.info(f"   🎯 Mídias restantes: {len(available_media) - 1}")
-            
-            return True
+            if success:
+                self.sent_messages.add(msg_id)
+                logger.info(f"✅ Mídia enviada como nova mensagem!")
+                logger.info(f"   📊 Total enviadas: {len(self.sent_messages)}")
+                return True
+            else:
+                return False
             
         except errors.FloodWaitError as e:
-            logger.warning(f"⏳ Flood wait: {e.seconds} segundos")
+            logger.warning(f"⏳ Flood wait: {e.seconds}s")
             await asyncio.sleep(e.seconds)
             return False
             
@@ -141,18 +202,18 @@ class TelegramRepostBot:
             return False
 
     async def run(self):
-        """Loop principal - apenas mídias"""
-        logger.info("🚀 Iniciando Bot de Repostagem de Mídias...")
+        """Loop principal - mídias como novas mensagens"""
+        logger.info("🚀 Iniciando Bot - Apenas Mídias (Sem Forward)")
         
         if not await self.connect():
             logger.error("❌ Falha na conexão")
             return
 
-        logger.info("🎯 Bot de mídias rodando! Apenas imagens/vídeos serão enviados")
+        logger.info("🎯 Bot rodando! Mídias serão enviadas como novas mensagens")
         
         while True:
             try:
-                # Envia uma mídia aleatória
+                # Envia uma mídia
                 success = await self.send_random_media()
                 
                 # Calcula próximo intervalo
@@ -160,17 +221,14 @@ class TelegramRepostBot:
                 next_time = datetime.now(self.timezone) + timedelta(seconds=wait_time)
                 
                 if success:
-                    logger.info(f"⏰ Próxima mídia em {wait_time//60} minutos")
-                    logger.info(f"   🕒 Horário: {next_time.strftime('%d/%m %H:%M')}")
+                    logger.info(f"⏰ Próxima mídia em {wait_time//60}min ({next_time.strftime('%H:%M')})")
                 else:
-                    logger.warning(f"🔄 Nova tentativa em {wait_time//60} minutos")
+                    logger.warning(f"🔄 Tentativa em {wait_time//60}min")
                 
-                # Aguarda o intervalo
                 await asyncio.sleep(wait_time)
                 
             except Exception as e:
-                logger.error(f"💥 Erro no loop principal: {e}")
-                logger.info("🔄 Reiniciando em 5 minutos...")
+                logger.error(f"💥 Erro: {e}")
                 await asyncio.sleep(300)
 
 async def main():
