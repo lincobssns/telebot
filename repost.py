@@ -3,6 +3,7 @@ import os
 import random
 import logging
 from telegram import Bot
+from telegram.error import TelegramError
 from datetime import datetime
 import pytz
 
@@ -22,30 +23,91 @@ logging.basicConfig(
 
 # =================== VARIÁVEIS GLOBAIS ===================
 sent_messages = set()  # Armazena IDs das mensagens já enviadas
-media_messages = []    # Armazena todas as mídias do canal
 
 # =================== FUNÇÕES ===================
 
 def now_str():
     return datetime.now(TIMEZONE).strftime("%d/%m/%Y %H:%M:%S")
 
-async def get_media_messages(bot, source_channel_id):
-    """Busca todas as mensagens com mídia do canal de origem."""
+async def test_bot_access(bot):
+    """Testa se o bot tem acesso aos canais."""
     try:
+        # Testa acesso ao canal de origem
+        chat = await bot.get_chat(chat_id=SOURCE_CHANNEL_ID)
+        logging.info(f"✅ Acesso ao canal de origem: {chat.title}")
+        
+        # Testa acesso ao canal de destino
+        chat_dest = await bot.get_chat(chat_id=DESTINATION_CHANNEL_ID)
+        logging.info(f"✅ Acesso ao canal de destino: {chat_dest.title}")
+        
+        return True
+    except TelegramError as e:
+        logging.error(f"❌ Erro de acesso: {e}")
+        return False
+
+async def get_manual_message_ids(bot):
+    """Obtém mensagens manualmente - você precisa adicionar os IDs reais aqui."""
+    try:
+        # ⚠️ IMPORTANTE: Adicione os IDs reais das mensagens do seu canal
+        # Como obter os IDs:
+        # 1. Encaminhe a mensagem para @userinfobot
+        # 2. Ou adicione @RawDataBot ao canal
+        # 3. Ou use qualquer bot que mostre o ID da mensagem
+        
+        MANUAL_MESSAGE_IDS = [
+            # EXEMPLO - SUBSTITUA COM SEUS IDs REAIS:
+            # 123, 124, 125, etc.
+            # Adicione pelo menos 5-10 IDs para testar
+        ]
+        
+        if not MANUAL_MESSAGE_IDS:
+            logging.warning("⚠️ Nenhum ID manual configurado")
+            return []
+        
         messages = []
-        logging.info("🔍 Buscando mídias no canal de origem...")
-        
-        # Usa get_chat_history para buscar mensagens
-        async for message in bot.get_chat_history(chat_id=source_channel_id, limit=1000):
-            if (message.photo or message.video or message.audio or 
-                message.document or message.animation or message.voice or
-                message.sticker):
+        for msg_id in MANUAL_MESSAGE_IDS:
+            try:
+                message = await bot.get_message(chat_id=SOURCE_CHANNEL_ID, message_id=msg_id)
                 messages.append(message)
+                logging.info(f"✅ Carregada mensagem ID {msg_id}")
+            except Exception as e:
+                logging.warning(f"⚠️ Não foi possível carregar mensagem {msg_id}: {e}")
         
-        logging.info(f"📥 Encontradas {len(messages)} mensagens com mídia")
         return messages
+        
     except Exception as e:
-        logging.error(f"❌ Erro ao buscar mídias: {e}")
+        logging.error(f"❌ Erro ao carregar IDs manuais: {e}")
+        return []
+
+async def create_test_media(bot):
+    """Cria mídias de teste para demonstração."""
+    try:
+        logging.info("🔄 Criando mídias de teste...")
+        test_messages = []
+        
+        # Envia algumas fotos de exemplo
+        photo_urls = [
+            "https://images.unsplash.com/photo-1579546929662-711aa81148cf",
+            "https://images.unsplash.com/photo-1551963831-b3b1ca40c98e",
+            "https://images.unsplash.com/photo-1487412720507-e7ab37603c6f"
+        ]
+        
+        for i, url in enumerate(photo_urls):
+            try:
+                msg = await bot.send_photo(
+                    chat_id=SOURCE_CHANNEL_ID,
+                    photo=url,
+                    caption=f"📸 Foto de teste {i+1} - {now_str()}"
+                )
+                test_messages.append(msg)
+                logging.info(f"✅ Criada mídia de teste {i+1}")
+            except Exception as e:
+                logging.warning(f"⚠️ Erro ao criar mídia {i+1}: {e}")
+        
+        return test_messages
+        
+    except Exception as e:
+        logging.error(f"❌ Erro ao criar mídias de teste: {e}")
         return []
 
 async def forward_media_message(bot, source_message, destination_channel_id):
@@ -116,9 +178,9 @@ async def copy_media_message(bot, source_message, destination_channel_id):
         logging.error(f"❌ Falha ao copiar {source_message.message_id}: {e}")
         return False
 
-async def send_random_media(bot):
+async def send_random_media(bot, media_messages):
     """Envia uma mídia aleatória para o canal de destino."""
-    global media_messages, sent_messages
+    global sent_messages
     
     if not media_messages:
         logging.warning("⚠️ Nenhuma mídia disponível")
@@ -155,24 +217,26 @@ async def send_random_media(bot):
 
 async def main_loop():
     """Loop principal do bot."""
-    global media_messages
-    
     if not BOT_TOKEN:
         logging.error("❌ BOT_TOKEN não configurado")
         return
     
     bot = Bot(token=BOT_TOKEN)
     
-    # Carrega mídias do canal de origem
-    logging.info("🔄 Carregando mídias do canal de origem...")
-    media_messages = await get_media_messages(bot, SOURCE_CHANNEL_ID)
+    # Testa acesso aos canais
+    if not await test_bot_access(bot):
+        return
+    
+    # Carrega mídias (primeiro tenta manual, depois cria teste)
+    logging.info("🔄 Carregando mídias...")
+    media_messages = await get_manual_message_ids(bot)
     
     if not media_messages:
-        logging.error("❌ Nenhuma mídia encontrada no canal de origem")
-        logging.error("💡 Verifique se:")
-        logging.error("   - O bot é ADMIN no canal de origem")
-        logging.error("   - Existem mídias no canal")
-        logging.error("   - O ID do canal está correto")
+        logging.info("🔄 Criando mídias de teste...")
+        media_messages = await create_test_media(bot)
+    
+    if not media_messages:
+        logging.error("❌ Não foi possível obter mídias")
         return
     
     logging.info("🤖 BOT INICIADO COM SUCESSO!")
@@ -186,17 +250,13 @@ async def main_loop():
     while True:
         try:
             # Envia uma mídia
-            success = await send_random_media(bot)
+            success = await send_random_media(bot, media_messages)
             
             if success:
                 sent_count += 1
             
-            # Calcula próximo horário
-            next_time = datetime.now(TIMEZONE) + asyncio.timeout(INTERVAL_HOURS * 3600)
-            logging.info(f"⏰ Próximo envio: {next_time.strftime('%d/%m/%Y %H:%M:%S')}")
-            logging.info(f"⏳ Aguardando {INTERVAL_HOURS} horas...")
-            
             # Aguarda o intervalo
+            logging.info(f"⏳ Aguardando {INTERVAL_HOURS} horas...")
             await asyncio.sleep(INTERVAL_HOURS * 3600)
             
         except Exception as e:
