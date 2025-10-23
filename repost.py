@@ -10,10 +10,9 @@ from flask import Flask
 from threading import Thread
 import warnings
 
-# Suprime warnings do Flask
 warnings.filterwarnings("ignore", category=UserWarning)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Servidor de Health Check
@@ -28,15 +27,13 @@ def health():
     return 'OK', 200
 
 def run_health_server():
-    """Executa o servidor de health check em porta separada"""
     port = int(os.getenv('PORT', 8000))
-    logger.info(f"🩺 Servidor de health check iniciado na porta {port}")
+    logger.info(f"🩺 Servidor de health check na porta {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 class SessionManager:
     @staticmethod
     def load_session():
-        """Carrega a sessão do environment"""
         session_data = os.getenv('SESSION_DATA')
         if session_data:
             try:
@@ -49,47 +46,28 @@ class SessionManager:
                 logger.error(f"❌ Erro ao carregar sessão: {e}")
         return False
 
-    @staticmethod
-    def save_session_to_env():
-        """Salva a sessão atual de volta para o environment (para copiar manualmente)"""
-        try:
-            if os.path.exists('koyeb_session.session'):
-                with open('koyeb_session.session', 'rb') as f:
-                    session_data = base64.b64encode(f.read()).decode('utf-8')
-                logger.info("📋 SESSAO ATUAL (COPIAR PARA KOYEB):")
-                logger.info(f"SESSION_DATA={session_data}")
-                return session_data
-        except Exception as e:
-            logger.error(f"❌ Erro ao salvar sessão: {e}")
-        return None
-
 class TelegramRepostBot:
     def __init__(self):
-        # Carrega sessão primeiro
         SessionManager.load_session()
         
         self.api_id = 26949670
         self.api_hash = 'fcb4ebdda2cc008abb37ad9fd9ce3c3a'
-        self.phone = '+5511960188559'
-        
-        self.donor_channel = -1003106957508  # Canal de origem
-        self.target_channel = -1003135697010  # Canal de destino
-        
-        self.min_interval = 1800  # 30 minutos
-        self.max_interval = 7200  # 2 horas
+        self.donor_channel = -1003106957508
+        self.target_channel = -1003135697010
+        self.min_interval = 1800
+        self.max_interval = 7200
         self.timezone = pytz.timezone('America/Sao_Paulo')
         
         self.client = TelegramClient('koyeb_session', self.api_id, self.api_hash)
         self.sent_messages = set()
 
     async def connect(self):
-        """Conecta usando sessão existente ou cria nova"""
         try:
             await self.client.connect()
             
             if not await self.client.is_user_authorized():
-                logger.warning("🔑 Sessão expirada. Iniciando login...")
-                return await self.login()
+                logger.error("❌ Sessão inválida! Execute localmente para criar nova sessão.")
+                return False
                 
             logger.info("✅ Conectado com sessão existente!")
             me = await self.client.get_me()
@@ -100,54 +78,12 @@ class TelegramRepostBot:
             logger.error(f"❌ Erro de conexão: {e}")
             return False
 
-    async def login(self):
-        """Faz login manualmente"""
-        try:
-            logger.info("📱 Iniciando processo de login...")
-            
-            # Envia código de verificação
-            await self.client.send_code_request(self.phone)
-            
-            # Em ambiente local você pediria o código, mas no Koyeb precisamos de uma abordagem diferente
-            logger.error("🚫 Login manual necessário. Execute localmente para gerar nova sessão.")
-            
-            # Salva sessão vazia para evitar loop
-            self.client.session.save()
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Erro no login: {e}")
-            return False
-
-    async def test_connection(self):
-        """Testa se a conexão está funcionando"""
-        try:
-            me = await self.client.get_me()
-            if me:
-                logger.info(f"✅ Conexão teste OK: {me.first_name}")
-                return True
-        except Exception as e:
-            logger.error(f"❌ Teste de conexão falhou: {e}")
-        return False
-
     def is_media_message(self, message):
-        """Verifica se a mensagem contém mídia"""
         if not message:
             return False
-        
-        if hasattr(message, 'media') and message.media:
-            return True
-        
-        if (hasattr(message, 'photo') and message.photo or
-            hasattr(message, 'video') and message.video or
-            hasattr(message, 'document') and message.document or
-            hasattr(message, 'sticker') and message.sticker):
-            return True
-            
-        return False
+        return hasattr(message, 'media') and message.media
 
     async def get_available_media_messages(self):
-        """Coleta apenas mensagens com mídia"""
         try:
             logger.info(f"🔍 Coletando MÍDIAS do canal {self.donor_channel}")
             media_messages = []
@@ -166,15 +102,11 @@ class TelegramRepostBot:
             return []
 
     async def download_and_send_media(self, message):
-        """Baixa e reenvia a mídia (sem forward)"""
         try:
             file_path = await message.download_media()
-            
             if not file_path:
-                logger.error("❌ Não foi possível baixar a mídia")
                 return False
             
-            # Envia a mídia como nova mensagem
             await self.client.send_file(
                 self.target_channel,
                 file_path,
@@ -182,7 +114,6 @@ class TelegramRepostBot:
                 supports_streaming=True
             )
             
-            # Limpa o arquivo baixado
             if os.path.exists(file_path):
                 os.remove(file_path)
             
@@ -195,58 +126,43 @@ class TelegramRepostBot:
             return False
 
     async def send_random_media(self):
-        """Envia uma mídia aleatória (sem forward)"""
         available_media = await self.get_available_media_messages()
         
         if not available_media:
-            logger.info("🔄 Todas as mídias enviadas! Reiniciando ciclo...")
+            logger.info("🔄 Reiniciando ciclo...")
             self.sent_messages.clear()
             available_media = await self.get_available_media_messages()
             
-            if not available_media:
-                logger.warning("📭 Nenhuma mídia disponível")
-                return False
+        if not available_media:
+            return False
 
         message, msg_id = random.choice(available_media)
         
         try:
-            logger.info(f"📤 Enviando mídia ID {message.id} (sem forward)...")
-            
+            logger.info(f"📤 Enviando mídia ID {message.id}...")
             success = await self.download_and_send_media(message)
             
             if success:
                 self.sent_messages.add(msg_id)
-                logger.info(f"✅ Mídia enviada como nova mensagem!")
-                logger.info(f"   📊 Total enviadas: {len(self.sent_messages)}")
+                logger.info(f"✅ Mídia enviada! Total: {len(self.sent_messages)}")
                 return True
-            else:
-                return False
+            return False
             
         except errors.FloodWaitError as e:
             logger.warning(f"⏳ Flood wait: {e.seconds}s")
             await asyncio.sleep(e.seconds)
             return False
-            
         except Exception as e:
             logger.error(f"❌ Erro ao enviar mídia: {e}")
             return False
 
     async def run(self):
-        """Loop principal"""
-        logger.info("🚀 Iniciando Bot - Apenas Mídias (Sem Forward)")
+        logger.info("🚀 Iniciando Bot...")
         
         if not await self.connect():
-            logger.error("❌ Falha na conexão - Sessão expirada")
-            # Salva a sessão atual (pode estar vazia)
-            SessionManager.save_session_to_env()
             return
 
-        # Testa a conexão
-        if not await self.test_connection():
-            logger.error("❌ Teste de conexão falhou")
-            return
-
-        logger.info("🎯 Bot rodando! Mídias serão enviadas como novas mensagens")
+        logger.info("🎯 Bot rodando!")
         
         while True:
             try:
@@ -256,7 +172,7 @@ class TelegramRepostBot:
                 next_time = datetime.now(self.timezone) + timedelta(seconds=wait_time)
                 
                 if success:
-                    logger.info(f"⏰ Próxima mídia em {wait_time//60}min ({next_time.strftime('%H:%M')})")
+                    logger.info(f"⏰ Próxima em {wait_time//60}min ({next_time.strftime('%H:%M')})")
                 else:
                     logger.warning(f"🔄 Tentativa em {wait_time//60}min")
                 
@@ -267,14 +183,10 @@ class TelegramRepostBot:
                 await asyncio.sleep(300)
 
 async def main():
-    # Inicia o servidor de health check em thread separada
     health_thread = Thread(target=run_health_server, daemon=True)
     health_thread.start()
-    
-    # Aguarda um pouco para o servidor iniciar
     await asyncio.sleep(2)
     
-    # Inicia o bot
     bot = TelegramRepostBot()
     await bot.run()
 
