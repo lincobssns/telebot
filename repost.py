@@ -1,15 +1,18 @@
 import asyncio
 import os
-import logging
 import json
-from telegram import Bot, Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+import random
+import logging
+from telegram import Bot
+from datetime import datetime
+import pytz
 
 # =================== CONFIGURAÇÕES ===================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SOURCE_CHANNEL_ID = -1003106957508
 DESTINATION_CHANNEL_ID = -1003135697010
 INTERVAL_HOURS = 2
+TIMEZONE = pytz.timezone('America/Sao_Paulo')
 
 # =================== LOGGING ===================
 logging.basicConfig(
@@ -19,194 +22,178 @@ logging.basicConfig(
 )
 
 # =================== ARMAZENAMENTO ===================
-MEDIA_QUEUE_FILE = "media_queue.json"
+MEDIA_IDS_FILE = "media_ids.json"
+SENT_IDS_FILE = "sent_ids.json"
 
-def load_media_queue():
-    """Carrega a fila de mídias do arquivo."""
+def load_json_file(filename):
+    """Carrega dados de arquivo JSON."""
     try:
-        if os.path.exists(MEDIA_QUEUE_FILE):
-            with open(MEDIA_QUEUE_FILE, 'r') as f:
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
                 return json.load(f)
     except Exception as e:
-        logging.error(f"❌ Erro ao carregar fila: {e}")
+        logging.error(f"❌ Erro ao carregar {filename}: {e}")
     return []
 
-def save_media_queue(queue):
-    """Salva a fila de mídias no arquivo."""
+def save_json_file(filename, data):
+    """Salva dados em arquivo JSON."""
     try:
-        with open(MEDIA_QUEUE_FILE, 'w') as f:
-            json.dump(queue, f)
+        with open(filename, 'w') as f:
+            json.dump(data, f)
     except Exception as e:
-        logging.error(f"❌ Erro ao salvar fila: {e}")
+        logging.error(f"❌ Erro ao salvar {filename}: {e}")
 
-# =================== FUNÇÕES ===================
+# =================== FUNÇÕES PRINCIPAIS ===================
 
-async def handle_new_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Captura novas mensagens do canal de origem."""
-    try:
-        message = update.effective_message
+async def discover_media_messages(bot):
+    """Descobre automaticamente mensagens com mídia no canal."""
+    logging.info("🔍 Iniciando busca automática por mídias...")
+    
+    media_ids = []
+    found_count = 0
+    
+    # Estratégia: testar um grande range de IDs
+    ranges_to_test = [
+        (1, 300),      # Primeiras mensagens
+        (301, 600),    # Mensagens do meio
+        (601, 900),    # Últimas mensagens
+    ]
+    
+    for start, end in ranges_to_test:
+        logging.info(f"📡 Verificando IDs {start} a {end}...")
         
-        # Verifica se é do canal de origem
-        if message.chat.id != SOURCE_CHANNEL_ID:
-            return
-        
-        # Verifica se tem mídia
-        has_media = (message.photo or message.video or message.audio or 
-                    message.document or message.animation or message.sticker or
-                    message.voice)
-        
-        if has_media:
-            # Adiciona à fila
-            queue = load_media_queue()
-            queue.append({
-                'message_id': message.message_id,
-                'chat_id': message.chat.id,
-                'timestamp': message.date.isoformat() if message.date else None
-            })
-            save_media_queue(queue)
-            
-            logging.info(f"📥 Nova mídia adicionada à fila: ID {message.message_id}")
-            logging.info(f"📊 Fila atual: {len(queue)} mídias")
-            
-    except Exception as e:
-        logging.error(f"💥 Erro ao processar mensagem: {e}")
-
-async def send_from_queue(context: ContextTypes.DEFAULT_TYPE):
-    """Envia uma mídia da fila a cada 2 horas."""
-    try:
-        bot = context.bot
-        queue = load_media_queue()
-        
-        if not queue:
-            logging.info("⏳ Nenhuma mídia na fila...")
-            return
-        
-        # Pega a mídia mais antiga
-        media_info = queue.pop(0)
-        message_id = media_info['message_id']
-        
-        logging.info(f"📤 Enviando mídia da fila: ID {message_id}")
-        
-        # Tenta encaminhar
-        try:
-            await bot.forward_message(
-                chat_id=DESTINATION_CHANNEL_ID,
-                from_chat_id=SOURCE_CHANNEL_ID,
-                message_id=message_id
-            )
-            logging.info(f"✅ Mídia {message_id} encaminhada com sucesso")
-            
-        except Exception as e:
-            logging.error(f"❌ Erro ao encaminhar {message_id}: {e}")
-            # Se falhar, recoloca na fila
-            queue.insert(0, media_info)
-        
-        # Salva a fila atualizada
-        save_media_queue(queue)
-        logging.info(f"📊 Fila restante: {len(queue)} mídias")
-        
-    except Exception as e:
-        logging.error(f"💥 Erro no agendador: {e}")
-
-async def initialize_existing_media(bot):
-    """Tenta carregar mídias existentes do canal (apenas para novas instalações)."""
-    try:
-        queue = load_media_queue()
-        
-        # Se já tem mídias na fila, não precisa recarregar
-        if queue:
-            logging.info(f"📊 Fila existente carregada: {len(queue)} mídias")
-            return
-        
-        logging.info("🔍 Tentando carregar mídias existentes...")
-        
-        # Esta é uma abordagem limitada - funciona apenas para mensagens recentes
-        # Em produção, você precisaria de uma forma mais robusta
-        
-        # Vamos tentar acessar algumas mensagens recentes
-        for offset in range(1, 100):  # Tenta IDs de 1 a 100
+        for msg_id in range(start, end + 1):
             try:
-                message = await bot.get_message(
-                    chat_id=SOURCE_CHANNEL_ID,
-                    message_id=offset
-                )
+                message = await bot.get_message(SOURCE_CHANNEL_ID, msg_id)
                 
                 if (message.photo or message.video or message.audio or 
-                    message.document or message.animation or message.sticker):
-                    
-                    queue.append({
-                        'message_id': message.message_id,
-                        'chat_id': message.chat.id,
-                        'timestamp': message.date.isoformat() if message.date else None
-                    })
-                    logging.info(f"✅ Mídia existente encontrada: ID {message.message_id}")
-                    
+                    message.document or message.animation or message.sticker or
+                    message.voice):
+                    media_ids.append(msg_id)
+                    found_count += 1
+                    logging.info(f"✅ Mídia {found_count}: ID {msg_id}")
+                
             except Exception:
-                # Mensagem não existe, continua para a próxima
+                # Mensagem não existe ou não pode ser acessada
                 continue
-        
-        if queue:
-            save_media_queue(queue)
-            logging.info(f"📥 {len(queue)} mídias existentes adicionadas à fila")
-        else:
-            logging.info("📝 Aguardando novas mídias...")
             
-    except Exception as e:
-        logging.error(f"❌ Erro ao carregar mídias existentes: {e}")
+            # Pequena pausa para não sobrecarregar a API
+            await asyncio.sleep(0.1)
+    
+    # Remove duplicatas e ordena
+    media_ids = sorted(list(set(media_ids)))
+    
+    # Salva os IDs encontrados
+    save_json_file(MEDIA_IDS_FILE, media_ids)
+    
+    logging.info(f"🎯 BUSCA CONCLUÍDA: {len(media_ids)} mídias encontradas!")
+    return media_ids
 
-async def main():
-    """Função principal."""
+async def send_media_message(bot, msg_id):
+    """Envia uma mensagem de mídia."""
+    try:
+        await bot.forward_message(
+            chat_id=DESTINATION_CHANNEL_ID,
+            from_chat_id=SOURCE_CHANNEL_ID,
+            message_id=msg_id
+        )
+        return True
+    except Exception as e:
+        logging.error(f"❌ Erro ao enviar {msg_id}: {e}")
+        return False
+
+async def main_loop():
+    """Loop principal do bot."""
     if not BOT_TOKEN:
         logging.error("❌ BOT_TOKEN não configurado")
         return
     
-    # Cria a aplicação
-    application = Application.builder().token(BOT_TOKEN).build()
+    bot = Bot(token=BOT_TOKEN)
     
-    # Configura o handler para novas mensagens
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(chat_id=SOURCE_CHANNEL_ID) & 
-            (filters.PHOTO | filters.VIDEO | filters.AUDIO | 
-             filters.Document.ALL | filters.ANIMATION | filters.VOICE | 
-             filters.STICKER),
-            handle_new_message
-        )
-    )
-    
-    # Agenda o envio automático
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(
-            send_from_queue,
-            interval=INTERVAL_HOURS * 3600,
-            first=10  # Primeira execução em 10 segundos
-        )
-    
-    # Inicializa o bot
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    # Tenta carregar mídias existentes
-    await initialize_existing_media(application.bot)
-    
-    logging.info("🤖 BOT INICIADO - TOTALMENTE AUTOMATIZADO!")
-    logging.info(f"📥 Monitorando: {SOURCE_CHANNEL_ID}")
-    logging.info(f"📤 Enviando para: {DESTINATION_CHANNEL_ID}")
-    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS} horas")
-    logging.info("🎯 Modo: Captura automática + encaminhamento")
-    
-    # Mantém o bot rodando
+    # Verifica acesso aos canais
     try:
-        while True:
-            await asyncio.sleep(3600)
-    except KeyboardInterrupt:
-        logging.info("🛑 Bot interrompido")
-    finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        source_chat = await bot.get_chat(SOURCE_CHANNEL_ID)
+        dest_chat = await bot.get_chat(DESTINATION_CHANNEL_ID)
+        logging.info(f"✅ Acesso confirmado: {source_chat.title} → {dest_chat.title}")
+    except Exception as e:
+        logging.error(f"❌ Erro de acesso: {e}")
+        return
+    
+    # Carrega ou descobre mídias
+    media_ids = load_json_file(MEDIA_IDS_FILE)
+    
+    if not media_ids:
+        logging.info("🔄 Nenhuma mídia salva. Iniciando busca automática...")
+        media_ids = await discover_media_messages(bot)
+    
+    if not media_ids:
+        logging.error("❌ Nenhuma mídia encontrada no canal")
+        return
+    
+    # Carrega IDs já enviados
+    sent_ids = set(load_json_file(SENT_IDS_FILE))
+    
+    logging.info("🤖 BOT INICIADO NO RAILWAY!")
+    logging.info(f"📊 Mídias disponíveis: {len(media_ids)}")
+    logging.info(f"📤 Já enviadas: {len(sent_ids)}")
+    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS} horas")
+    logging.info("🔄 Executando 24/7...")
+    
+    cycle_count = 0
+    
+    while True:
+        try:
+            cycle_count += 1
+            logging.info(f"🔄 Ciclo #{cycle_count}")
+            
+            # Filtra mídias não enviadas
+            available_ids = [msg_id for msg_id in media_ids if msg_id not in sent_ids]
+            
+            if not available_ids:
+                logging.info("🎉 TODAS as mídias foram enviadas! Reiniciando ciclo...")
+                sent_ids.clear()
+                save_json_file(SENT_IDS_FILE, [])
+                available_ids = media_ids
+            
+            # Seleção aleatória
+            selected_id = random.choice(available_ids)
+            logging.info(f"🎲 Selecionada mídia ID {selected_id}")
+            
+            # Envio
+            success = await send_media_message(bot, selected_id)
+            
+            if success:
+                sent_ids.add(selected_id)
+                save_json_file(SENT_IDS_FILE, list(sent_ids))
+                logging.info(f"📈 Progresso: {len(sent_ids)}/{len(media_ids)}")
+                
+                # Log de estatísticas
+                progress = (len(sent_ids) / len(media_ids)) * 100
+                logging.info(f"📊 Conclusão: {progress:.1f}%")
+            
+            # Próximo horário
+            next_time = datetime.now(TIMEZONE) + asyncio.timeout(INTERVAL_HOURS * 3600)
+            logging.info(f"⏰ Próximo envio: {next_time.strftime('%d/%m %H:%M')}")
+            logging.info(f"💤 Aguardando {INTERVAL_HOURS} horas...")
+            
+            await asyncio.sleep(INTERVAL_HOURS * 3600)
+            
+        except Exception as e:
+            logging.error(f"💥 Erro no ciclo {cycle_count}: {e}")
+            logging.info("🔄 Tentando novamente em 10 minutos...")
+            await asyncio.sleep(600)
+
+# =================== EXECUÇÃO ===================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.info("🚀 Iniciando Bot no Railway...")
+    
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        logging.info("🛑 Bot interrompido manualmente")
+    except Exception as e:
+        logging.error(f"💥 Erro fatal: {e}")
+        logging.info("🔄 Reiniciando em 30 segundos...")
+        asyncio.sleep(30)
+        asyncio.run(main_loop())
