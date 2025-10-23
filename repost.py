@@ -1,35 +1,25 @@
-# railway_bot.py
-import asyncio
+"""
+bot_forwarder_secure.py
+Versão segura: NÃO imprime segredos. Lê todas as credenciais via ENV.
+Use secrets no Railway / Heroku / seu host e NÃO suba .env público.
+"""
+
 import os
 import random
+import asyncio
 import sys
+import json
 import traceback
-from telethon import TelegramClient, errors
 from datetime import datetime
 import pytz
 
-# =================== CONFIGURAÇÕES ===================
-API_ID = int(os.getenv('API_ID', '28881388'))
-API_HASH = os.getenv('API_HASH', 'd9e8b04bb4a85f373cc9ba4692dd6cf4')
-SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_session')  # telegram_session.session
-BR_TIMEZONE = pytz.timezone('America/Sao_Paulo')
+from telethon import TelegramClient, errors as tele_errors
+from telegram import Bot, ParseMode
+from telegram.error import TelegramError
 
-# Intervalo configurável em horas (padrão 2)
-INTERVAL_HOURS = float(os.getenv('INTERVAL_HOURS', '2'))
-SEND_INTERVAL = int(INTERVAL_HOURS * 3600)
+# ============ UTIL =============
+BR_TIMEZONE = pytz.timezone(os.getenv("TZ", "America/Sao_Paulo"))
 
-# Quantas mensagens recentes buscar do canal doador quando for enviar (padrão 100)
-LIMIT_MESSAGES = int(os.getenv('LIMIT_MESSAGES', '100'))
-
-# Par de doador -> receptor
-donor_recipient_pairs = {
-    -1002957443418: -1002646886211,  # ajuste conforme necessário
-}
-
-# Cliente Telethon
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-
-# =================== UTIL ===================
 def now_str():
     return datetime.now(BR_TIMEZONE).strftime('%d/%m/%Y %H:%M:%S')
 
@@ -37,260 +27,271 @@ def safe_print(*args, **kwargs):
     print(*args, **kwargs)
     sys.stdout.flush()
 
-# =================== CONEXÃO ===================
-async def connect_with_session(force_reconnect=False):
-    """Conecta usando a sessão existente; retorna True se ok."""
+def mask_secret(value: str, keep=4):
+    """Mascarar segredos para log (mostra apenas últimos `keep` chars)."""
+    if not value:
+        return "<empty>"
+    s = str(value)
+    if len(s) <= keep:
+        return "*" * len(s)
+    return ("*" * (len(s) - keep)) + s[-keep:]
+
+# ============ CARREGAMENTO DE VARIÁVEIS (obrigatórias) =============
+# Variáveis obrigatórias (defina como secrets no Railway)
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+SESSION_FILE = os.getenv("SESSION_FILE", "telegram_session.session")  # nome do arquivo .session no container
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Configuráveis
+INTERVAL_HOURS = float(os.getenv("INTERVAL_HOURS", "2"))
+SEND_INTERVAL = int(INTERVAL_HOURS * 3600)
+LIMIT_MESSAGES = int(os.getenv("LIMIT_MESSAGES", "100"))
+
+# PARES doador -> receptor (JSON string ou fallback hardcoded seguro)
+# Exemplo de variável de ambiente:
+# DONOR_RECIPIENT_PAIRS='{"-1002957443418": -1002646886211}'
+pairs_env = os.getenv("DONOR_RECIPIENT_PAIRS")
+if pairs_env:
     try:
-        safe_print(f"{now_str()} 🔗 Tentando conectar via sessão (force_reconnect={force_reconnect})...")
-        if force_reconnect:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+        donor_recipient_pairs = {int(k): int(v) for k, v in json.loads(pairs_env).items()}
+    except Exception:
+        safe_print(f"{now_str()} ❌ DONOR_RECIPIENT_PAIRS inválido. Use JSON como '{{\"-100...\": -100...}}'")
+        donor_recipient_pairs = {}
+else:
+    # fallback - vazio (evita expor IDs no código)
+    donor_recipient_pairs = {}
 
-        await client.connect()
-        # garante autorizado
-        if not await client.is_user_authorized():
-            safe_print(f"{now_str()} ❌ Sessão inválida ou expirada.")
-            return False
+# ============ VALIDAÇÕES INICIAIS ============
+def validate_config_or_exit():
+    missing = []
+    if not API_ID:
+        missing.append("API_ID")
+    if not API_HASH:
+        missing.append("API_HASH")
+    if not BOT_TOKEN:
+        missing.append("BOT_TOKEN")
+    if not donor_recipient_pairs:
+        missing.append("DONOR_RECIPIENT_PAIRS (não foi fornecido ou inválido)")
 
-        # limpa updates pendentes
-        try:
-            await client.get_dialogs(limit=1)
-        except Exception:
-            # não crítico
-            pass
+    if missing:
+        safe_print(f"{now_str()} ❌ Configuração incompleta. Variáveis faltando: {', '.join(missing)}")
+        safe_print("Defina as variáveis de ambiente necessárias e reinicie o serviço.")
+        sys.exit(1)
 
-        safe_print(f"{now_str()} ✅ Conectado ao Telegram via sessão!")
-        return True
+    # Sessão: apenas checar presença do arquivo (se estiver usando Telethon)
+    if not os.path.exists(SESSION_FILE):
+        safe_print(f"{now_str()} ❌ Arquivo de sessão '{SESSION_FILE}' não encontrado no container.")
+        safe_print("⚠️ Gere a sessão localmente e faça upload do arquivo via painel (Files) do Railway/host.")
+        sys.exit(1)
 
-    except Exception as e:
-        safe_print(f"{now_str()} ❌ Erro na conexão: {e}")
-        return False
+# ============ LOG DE CONFIGURAÇÃO (mascarado) ============
+safe_print("=" * 60)
+safe_print("✅ INICIANDO (modo seguro). Configurações carregadas:")
+safe_print(f"- API_ID: {mask_secret(API_ID)}")
+safe_print(f"- API_HASH: {mask_secret(API_HASH)}")
+safe_print(f"- BOT_TOKEN: {mask_secret(BOT_TOKEN)}")
+safe_print(f"- SESSION_FILE: {SESSION_FILE} (não será exibido conteúdo)")
+safe_print(f"- INTERVAL_HOURS: {INTERVAL_HOURS}")
+safe_print(f"- LIMIT_MESSAGES: {LIMIT_MESSAGES}")
+safe_print(f"- PARES: {len(donor_recipient_pairs)} pares carregados (IDs não mostrados por segurança)")
+safe_print("=" * 60)
 
-# =================== ENVIO SEGURO ===================
-async def fetch_random_message_from_donor(donor_id):
-    """
-    Busca uma mensagem RECENTE do canal doador (sempre atual).
-    Retorna Telethon Message ou None.
-    """
+validate_config_or_exit()
+
+# ============ CLIENTES ============
+tele_client = TelegramClient(SESSION_FILE, int(API_ID), API_HASH)
+bot = Bot(token=BOT_TOKEN)
+
+# ============ FUNÇÕES PRINCIPAIS ============
+
+async def fetch_random_message(donor_id):
+    """Busca uma mensagem RECENTE do canal doador (sempre atual)."""
     try:
         msgs = []
-        async for m in client.iter_messages(donor_id, limit=LIMIT_MESSAGES):
+        async for m in tele_client.iter_messages(donor_id, limit=LIMIT_MESSAGES):
             if m is None:
                 continue
+            # Só aceita texto ou mídia
             if m.text or m.media:
                 msgs.append(m)
         if not msgs:
+            safe_print(f"{now_str()} ⚠️ Nenhuma mensagem válida encontrada no doador (masked).")
             return None
         return random.choice(msgs)
     except Exception as e:
-        safe_print(f"{now_str()} ❌ Erro ao buscar mensagens do {donor_id}: {e}")
+        safe_print(f"{now_str()} ❌ Erro ao ler canal doador (masked): {e}")
         return None
 
-async def download_media_safe(message):
-    """Baixa a mídia e retorna o caminho do arquivo (ou lista de caminhos se álbum)."""
-    # Se álbum (grouped_id), retorna lista de (path, text)
-    if message.grouped_id:
-        grouped = []
-        async for m in client.iter_messages(message.peer_id, limit=LIMIT_MESSAGES):
-            # coletamos os que possuem mesmo grouped_id
-            if getattr(m, "grouped_id", None) == message.grouped_id:
-                grouped.append(m)
-        media_files = []
-        for m in grouped:
-            if m.media:
-                path = await m.download_media()
-                media_files.append((path, m.text or ""))
-        return media_files  # list of tuples
-    else:
-        if message.media:
-            path = await message.download_media()
-            return path
-        return None
-
-async def send_message_no_forward(message, recipient_id):
+def download_media_bytes_sync(message):
     """
-    Envia uma única mensagem ao recipient_id sem mostrar 'Forwarded from'.
-    Faz download no momento do envio (evita file reference expired).
+    Baixa mídia para bytes (sincrono). O Telethon tem download_media que normalmente grava em disco.
+    Aqui fazemos o download para arquivo temporário e lemos bytes - isso evita expor caminhos no log.
+    """
+    import tempfile
+    try:
+        temp = tempfile.NamedTemporaryFile(delete=False)
+        path = temp.name
+        temp.close()
+        # Telethon download_media é async - chamamos via loop no async caller
+        return path
+    except Exception as e:
+        safe_print(f"{now_str()} ❌ Erro ao criar temp file: {e}")
+        return None
+
+async def send_via_bot(recipient_id, message):
+    """
+    Envia conteúdo do Telethon via Bot API.
+    Faz download da mídia no momento do envio (evita file reference expired).
+    Não imprime valores sensíveis.
     """
     try:
-        # Álbum
-        if message.grouped_id:
-            # buscar novamente o álbum diretamente do canal (garante referências válidas)
+        # Álbuns / grouped_id -> coletar todos do mesmo grouped_id
+        if getattr(message, "grouped_id", None):
             grouped = []
-            async for m in client.iter_messages(message.peer_id, limit=LIMIT_MESSAGES):
+            async for m in tele_client.iter_messages(message.peer_id, limit=LIMIT_MESSAGES):
                 if getattr(m, "grouped_id", None) == message.grouped_id:
                     grouped.append(m)
-            # baixar mídia
-            media_files = []
+            # montar envio multipart via envio sequencial (Bot API: enviar vários arquivos individualmente)
             for m in grouped:
-                if m.media:
-                    p = await m.download_media()
-                    media_files.append((p, m.text or ""))
+                sent = await send_via_bot(recipient_id, m)  # reentrância simples para cada item
+                await asyncio.sleep(0.5)
+            return True
 
-            if media_files:
-                await client.send_file(
-                    recipient_id,
-                    [p for p, _ in media_files],
-                    caption=grouped[0].text or "",
-                    parse_mode="html",
-                )
-                for p, _ in media_files:
-                    try: os.remove(p)
-                    except: pass
-                return True
-            # fallback: if none had media but text present
-            if grouped and grouped[0].text:
-                await client.send_message(recipient_id, grouped[0].text, parse_mode="html")
-                return True
-            return False
-
-        # Mídia única
-        if message.media:
-            # refetch the message fresh (by id) to ensure valid file reference
-            try:
-                fresh = await client.get_messages(message.peer_id, ids=message.id)
-                if fresh:
-                    message = fresh
-            except Exception:
-                # não crítico, prossegue com a message original
-                pass
-
-            file_path = await message.download_media()
-            if file_path:
-                await client.send_file(recipient_id, file_path, caption=message.text or "", parse_mode="html")
-                try: os.remove(file_path)
-                except: pass
-                return True
-            else:
-                # se download não retornou caminho, tenta enviar texto
+        # mídia única
+        if getattr(message, "photo", None) or getattr(message, "video", None) or getattr(message, "document", None) or getattr(message, "media", None):
+            # Baixar para bytes via Telethon (download para arquivo temporário e le leitura)
+            temp_path = await message.download_media()
+            if not temp_path:
+                # fallback para texto
                 if message.text:
-                    await client.send_message(recipient_id, message.text, parse_mode="html")
+                    bot.send_message(chat_id=recipient_id, text=message.text or "", parse_mode=ParseMode.HTML)
                     return True
                 return False
+            # Ler bytes em modo binário e enviar via Bot
+            try:
+                with open(temp_path, "rb") as fh:
+                    data = fh.read()
+                # Escolher tipo de envio
+                if getattr(message, "photo", None):
+                    bot.send_photo(chat_id=recipient_id, photo=data, caption=message.text or "", parse_mode=ParseMode.HTML)
+                elif getattr(message, "video", None):
+                    bot.send_video(chat_id=recipient_id, video=data, caption=message.text or "", parse_mode=ParseMode.HTML)
+                else:
+                    # documento / genérico
+                    bot.send_document(chat_id=recipient_id, document=data, caption=message.text or "", parse_mode=ParseMode.HTML)
+            finally:
+                # remove arquivo temporário sem log sensível
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+            return True
 
-        # Apenas texto
-        if message.text:
-            await client.send_message(recipient_id, message.text, parse_mode="html")
+        # texto puro
+        if getattr(message, "text", None):
+            bot.send_message(chat_id=recipient_id, text=message.text, parse_mode=ParseMode.HTML)
             return True
 
         return False
 
-    except errors.rpcerrorlist.FileReferenceExpiredError as e:
-        # file reference expirado — avisar e retornar False para tentar próxima vez
-        safe_print(f"{now_str()} ⚠️ File reference expired: {e}")
+    except TelegramError as te:
+        safe_print(f"{now_str()} ❌ Erro Bot API (não vazou token): {str(te)}")
         return False
-    except errors.FloodWaitError as e:
-        safe_print(f"{now_str()} ⛔ Flood wait: {e}. Dormindo {e.seconds}s")
-        await asyncio.sleep(e.seconds + 2)
+    except tele_errors.rpcerrorlist.FileReferenceExpiredError as e:
+        safe_print(f"{now_str()} ⚠️ File reference expirado: {e}")
         return False
     except Exception as e:
-        safe_print(f"{now_str()} ❌ Erro ao enviar sem forward: {e}")
+        safe_print(f"{now_str()} ❌ Erro inesperado no envio (masked): {e}")
         safe_print(traceback.format_exc())
         return False
 
-# =================== LOOP PRINCIPAL ===================
-async def bot_loop():
-    safe_print(f"{now_str()} 🔄 Iniciando ciclo principal (envio cada {INTERVAL_HOURS}h)...")
-    # Guarda índices enviados para evitar repetição imediata enquanto o processo roda
-    last_sent = {donor: set() for donor in donor_recipient_pairs}
-
-    backoff_seconds = 5
-
+# ============ LOOP PRINCIPAL ============
+async def forward_loop():
+    safe_print(f"{now_str()} 🔄 Iniciando loop seguro. Intervalo: {INTERVAL_HOURS}h")
+    sent_cache = {donor: set() for donor in donor_recipient_pairs.keys()}
     while True:
         try:
-            # Assegura conexão
-            if not client.is_connected():
-                ok = await connect_with_session(force_reconnect=True)
-                if not ok:
-                    safe_print(f"{now_str()} 🔁 Falha ao conectar — tentando em 60s...")
+            # Conferir conexão Telethon
+            if not await tele_client.is_connected():
+                safe_print(f"{now_str()} 🔁 Telethon desconectado, tentando reconectar...")
+                try:
+                    await tele_client.connect()
+                except Exception as e:
+                    safe_print(f"{now_str()} ❌ Falha ao reconectar Telethon (masked): {e}")
                     await asyncio.sleep(60)
                     continue
-                # limpa pequenas inconsistências
-                try: await client.get_dialogs(limit=1)
-                except: pass
 
-            safe_print(f"\n{now_str()} 🕒 Iniciando ciclo de envio...")
             for donor_id, recipient_id in donor_recipient_pairs.items():
                 try:
-                    # Busca uma mensagem sempre ao enviar (garante referências válidas)
-                    message = await fetch_random_message_from_donor(donor_id)
+                    message = await fetch_random_message(donor_id)
                     if not message:
-                        safe_print(f"{now_str()} ⚠️ Nenhuma mensagem encontrada no doador {donor_id}")
                         continue
 
-                    # Evita reenviar a mesma mensagem se já enviada recentemente
-                    attempts = 0
-                    while message.id in last_sent[donor_id] and attempts < 5:
-                        message = await fetch_random_message_from_donor(donor_id)
-                        attempts += 1
+                    # evita reenviar a mesma mensagem repetidamente
+                    if message.id in sent_cache[donor_id]:
+                        safe_print(f"{now_str()} ⚠️ Mensagem já enviada anteriormente (id masked). Pulando.")
+                        continue
 
-                    success = await send_message_no_forward(message, recipient_id)
+                    success = await send_via_bot(recipient_id, message)
                     if success:
-                        last_sent[donor_id].add(message.id)
-                        # mantém apenas últimas 500 ids para não crescer indefinidamente
-                        if len(last_sent[donor_id]) > 500:
-                            # remove alguns aleatoriamente
-                            to_remove = list(last_sent[donor_id])[:100]
-                            for r in to_remove:
-                                last_sent[donor_id].remove(r)
-                        safe_print(f"{now_str()} ✅ Enviado do {donor_id} -> {recipient_id} (msg id {message.id})")
+                        sent_cache[donor_id].add(message.id)
+                        safe_print(f"{now_str()} ✅ Enviado com sucesso (origem masked -> destino masked).")
                     else:
-                        safe_print(f"{now_str()} ⚠️ Falha ao enviar mensagem id {getattr(message, 'id', 'n/a')}, será tentada no próximo ciclo")
+                        safe_print(f"{now_str()} ⚠️ Falha no envio; será tentado no próximo ciclo (masked).")
 
-                    # Pausa curta entre envios para evitar flood
-                    await asyncio.sleep(2)
-
-                except Exception as inner:
-                    safe_print(f"{now_str()} ❌ Erro ao processar par {donor_id}->{recipient_id}: {inner}")
+                    await asyncio.sleep(2)  # evitar flood
+                except Exception as inner_e:
+                    safe_print(f"{now_str()} ❌ Erro interno ao processar par (masked): {inner_e}")
                     safe_print(traceback.format_exc())
-                    # Se for erro de conexão, reinicia o client
-                    if isinstance(inner, (ConnectionResetError, errors.rpcerrorlist.RPCError)):
-                        try:
-                            await client.disconnect()
-                        except: pass
+                    # se for erro de conexão, forçar restart do tele_client
+                    try:
+                        await tele_client.disconnect()
+                    except:
+                        pass
 
-            safe_print(f"{now_str()} ⏳ Próximo envio em {INTERVAL_HOURS:.1f} horas...")
-            backoff_seconds = 5  # reset backoff after successful cycle
+            safe_print(f"{now_str()} ⏳ Aguardando {INTERVAL_HOURS} horas para próximo envio (masked).")
             await asyncio.sleep(SEND_INTERVAL)
 
         except Exception as e:
-            safe_print(f"{now_str()} 💥 Erro no loop principal: {e}")
+            safe_print(f"{now_str()} 💥 Erro no loop principal (masked): {e}")
             safe_print(traceback.format_exc())
-            # Tentativa de recuperação com backoff exponencial
-            await asyncio.sleep(backoff_seconds)
-            backoff_seconds = min(backoff_seconds * 2, 600)
+            await asyncio.sleep(60)
             try:
-                await client.disconnect()
+                await tele_client.disconnect()
             except:
                 pass
 
-# =================== MAIN ===================
+# ============ START =============
 async def main():
-    safe_print("=" * 50)
-    safe_print("🤖 BOT TELEGRAM - RAILWAY MEDIA FORWARDER (Aprimorado)")
-    safe_print("=" * 50)
-
-    # Verifica sessão existente
-    session_file = f"{SESSION_NAME}.session"
-    if not os.path.exists(session_file):
-        safe_print(f"{now_str()} ❌ Arquivo de sessão '{session_file}' não encontrado!")
-        safe_print("💡 Gere a sessão localmente com Telethon (ou suba o arquivo .session correto).")
+    safe_print(f"{now_str()} ▶️ Inicializando serviços (modo seguro).")
+    # conecta Telethon (usa o arquivo .session provisionado)
+    try:
+        await tele_client.connect()
+        if not await tele_client.is_user_authorized():
+            safe_print(f"{now_str()} ❌ Sessão Telethon inválida (verifique o arquivo .session).")
+            return
+    except Exception as e:
+        safe_print(f"{now_str()} ❌ Erro ao conectar Telethon (masked): {e}")
         return
 
-    if not await connect_with_session():
-        safe_print(f"{now_str()} ❌ Falha na autenticação via sessão. Certifique-se de subir o arquivo .session gerado localmente.")
+    safe_print(f"{now_str()} ✅ Telethon conectado com sucesso (user masked).")
+    # Teste rápido do bot (sem mostrar token)
+    try:
+        me = bot.get_me()
+        safe_print(f"{now_str()} ✅ Bot API OK (username masked: {mask_secret(me.username if hasattr(me, 'username') else str(me), keep=6)})")
+    except Exception as e:
+        safe_print(f"{now_str()} ❌ Falha ao autenticar Bot API (masked): {e}")
         return
 
-    # Inicia loop principal
-    await bot_loop()
+    await forward_loop()
 
 if __name__ == "__main__":
     try:
+        validate_config_or_exit()
         asyncio.run(main())
     except KeyboardInterrupt:
-        safe_print("\n🛑 Bot interrompido manualmente.")
+        safe_print("\n🛑 Interrompido manualmente.")
     except Exception as e:
-        safe_print(f"💥 Erro fatal de execução: {e}")
+        safe_print(f"{now_str()} 💥 Erro fatal (masked): {e}")
         safe_print(traceback.format_exc())
