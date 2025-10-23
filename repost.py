@@ -3,13 +3,12 @@ import os
 import random
 import logging
 import json
-from base64 import b64encode, b64decode
+import base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from dotenv import load_dotenv
 from telethon import TelegramClient, errors
-from asyncio import sleep
 from datetime import datetime, timedelta
 import pytz
 
@@ -42,24 +41,24 @@ class SecureDataManager:
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=b'secure_repost_bot_salt',  # Salt fixo para este aplicativo
+            salt=b'secure_repost_bot_salt',
             iterations=100000,
         )
         key = kdf.derive(encryption_key.encode())
-        return b64encode(key)
+        return base64.urlsafe_b64encode(key)
     
     def encrypt(self, data):
         """Criptografa dados sensíveis"""
         if isinstance(data, str):
-            data = data.encode()
+            data = data.encode('utf-8')
         encrypted = self.fernet.encrypt(data)
-        return b64encode(encrypted).decode()
+        return base64.urlsafe_b64encode(encrypted).decode('utf-8')
     
     def decrypt(self, encrypted_data):
         """Descriptografa dados sensíveis"""
         try:
-            decrypted = self.fernet.decrypt(b64decode(encrypted_data))
-            return decrypted.decode()
+            decrypted = self.fernet.decrypt(base64.urlsafe_b64decode(encrypted_data))
+            return decrypted.decode('utf-8')
         except Exception as e:
             logger.error(f"Erro ao descriptografar: {e}")
             return None
@@ -73,18 +72,18 @@ class SecureConfig:
         """Carrega e valida configurações de forma segura"""
         try:
             # Telegram API
-            self.api_id = int(os.getenv('API_ID'))
-            self.api_hash = os.getenv('API_HASH')
-            self.phone_number = os.getenv('PHONE_NUMBER')
-            self.two_fa_password = os.getenv('TWO_FA_PASSWORD')
+            self.api_id = int(os.getenv('API_ID', '28881388'))
+            self.api_hash = os.getenv('API_HASH', 'd9e8b04bb4a85f373cc9ba4692dd6cf4')
+            self.phone_number = os.getenv('PHONE_NUMBER', '+5541988405232')
+            self.two_fa_password = os.getenv('TWO_FA_PASSWORD', '529702')
             
             # Bot Settings
             self.session_name = os.getenv('SESSION_NAME', 'telegram_session')
-            self.min_interval = int(os.getenv('MIN_INTERVAL', 1800))
-            self.max_interval = int(os.getenv('MAX_INTERVAL', 7200))
+            self.min_interval = int(os.getenv('MIN_INTERVAL', '1800'))
+            self.max_interval = int(os.getenv('MAX_INTERVAL', '7200'))
             
             # Channel pairs
-            pairs_str = os.getenv('CHANNEL_PAIRS', '')
+            pairs_str = os.getenv('CHANNEL_PAIRS', '-1002877945842:-1002760356238')
             self.donor_recipient_pairs = self._parse_channel_pairs(pairs_str)
             
             # Timezone
@@ -104,7 +103,7 @@ class SecureConfig:
             for pair in pairs_str.split(','):
                 if ':' in pair:
                     donor, recipient = pair.split(':')
-                    pairs[int(donor)] = int(recipient)
+                    pairs[int(donor.strip())] = int(recipient.strip())
         return pairs
     
     def _validate_config(self):
@@ -195,14 +194,15 @@ class SecureRepostBot:
     def generate_message_hash(self, message, cycle_number=1):
         """Gera hash único para mensagem com criptografia"""
         import hashlib
-        content = f"{message.id}_{message.peer_id.channel_id if message.peer_id else ''}_cycle{cycle_number}"
+        content = f"{message.id}_{message.chat_id if hasattr(message, 'chat_id') else ''}_cycle{cycle_number}"
         if message.text:
             content += message.text
         if message.media:
             if hasattr(message.media, 'document'):
                 content += str(message.media.document.id)
             elif hasattr(message.media, 'photo'):
-                content += str(message.media.photo.id)
+                if hasattr(message.media.photo, 'id'):
+                    content += str(message.media.photo.id)
         return hashlib.sha256(content.encode()).hexdigest()
 
     async def connect_client(self):
@@ -210,7 +210,6 @@ class SecureRepostBot:
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                # Log seguro (não mostra dados sensíveis)
                 logger.info(f"🔐 Conectando... Tentativa {attempt + 1}/{max_retries}")
                 await self.client.start(
                     phone=self.config.phone_number,
@@ -228,7 +227,7 @@ class SecureRepostBot:
             except Exception as e:
                 logger.warning(f"⚠️ Tentativa {attempt + 1} falhou: {str(e)}")
                 if attempt < max_retries - 1:
-                    await sleep(10 * (attempt + 1))
+                    await asyncio.sleep(10 * (attempt + 1))
         
         logger.error("🚫 Não foi possível conectar após várias tentativas.")
         return False
@@ -237,7 +236,7 @@ class SecureRepostBot:
         """Coleta mensagens de forma segura"""
         try:
             messages = []
-            async for message in self.client.iter_messages(donor_id, limit=None):
+            async for message in self.client.iter_messages(donor_id, limit=500):  # Limite para performance
                 if message:
                     messages.append(message)
             
@@ -301,19 +300,20 @@ class SecureRepostBot:
         original_message = self.donor_messages[donor_id][selected_index]
 
         # Processa álbuns
-        if original_message.grouped_id:
+        grouped_messages = [original_message]
+        grouped_indices = [selected_index]
+
+        # Para álbuns, precisamos de lógica adicional
+        if hasattr(original_message, 'grouped_id') and original_message.grouped_id:
             grouped_messages = [
                 msg for msg in self.donor_messages[donor_id]
-                if msg.grouped_id == original_message.grouped_id
+                if hasattr(msg, 'grouped_id') and msg.grouped_id == original_message.grouped_id
             ]
             grouped_indices = [
                 idx for idx, msg in enumerate(self.donor_messages[donor_id])
-                if msg.grouped_id == original_message.grouped_id
+                if hasattr(msg, 'grouped_id') and msg.grouped_id == original_message.grouped_id
                 and idx in available_indices
             ]
-        else:
-            grouped_messages = [original_message]
-            grouped_indices = [selected_index]
 
         # Remove do disponível
         for idx in grouped_indices:
@@ -325,8 +325,7 @@ class SecureRepostBot:
             try:
                 await self.client.forward_messages(
                     recipient_id,
-                    grouped_messages,
-                    from_peer=grouped_messages[0].peer_id
+                    grouped_messages
                 )
                 
                 for msg in grouped_messages:
@@ -339,11 +338,11 @@ class SecureRepostBot:
             except errors.FloodWaitError as e:
                 wait_time = e.seconds
                 logger.warning(f"⏳ Flood wait: {wait_time}s")
-                await sleep(wait_time)
+                await asyncio.sleep(wait_time)
             except Exception as e:
                 logger.error(f"❌ Tentativa {attempt + 1} falhou: {e}")
                 if attempt < 2:
-                    await sleep(5)
+                    await asyncio.sleep(5)
 
         logger.error("🚫 Falha ao enviar após 3 tentativas")
         return False
@@ -354,7 +353,7 @@ class SecureRepostBot:
         
         if total_available == 0:
             logger.info("🎯 Todas as mídias enviadas! Iniciando novo ciclo...")
-            await sleep(10)
+            await asyncio.sleep(10)
             self.start_new_cycle()
             await self.refresh_messages_for_cycle()
             return True
@@ -387,11 +386,11 @@ class SecureRepostBot:
                 progress = ((total_messages - total_available) / total_messages * 100) if total_messages > 0 else 0
                 
                 logger.info(f"📈 Progresso: {progress:.1f}% | Próximo: {next_interval/60:.1f}min ({next_time.strftime('%H:%M')})")
-                await sleep(next_interval)
+                await asyncio.sleep(next_interval)
 
             except Exception as e:
                 logger.error(f"💥 Erro no agendamento: {e}")
-                await sleep(300)
+                await asyncio.sleep(300)
 
     async def run(self):
         """Execução principal segura"""
@@ -423,7 +422,7 @@ async def main():
             logger.error(f"🔁 Bot crashou (tentativa {restart_count + 1}/{max_restarts}): {e}")
             if restart_count < max_restarts - 1:
                 logger.info(f"Reiniciando em {restart_delay}s...")
-                await sleep(restart_delay)
+                await asyncio.sleep(restart_delay)
                 restart_delay *= 2
             else:
                 logger.error("🚫 Máximo de reinicializações atingido")
