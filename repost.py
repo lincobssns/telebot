@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 class TelegramRepostBot:
     def __init__(self):
         # Configurações do Telegram
-        self.api_id = 28881388
-        self.api_hash = 'd9e8b04bb4a85f373cc9ba4692dd6cf4'
-        self.phone = '+5541988405232'
-        self.password = '529702'
+        self.api_id = 26949670
+        self.api_hash = 'fcb4ebdda2cc008abb37ad9fd9ce3c3a'
+        self.phone = '+5511960188559'
+        self.password = 'Isadora44'
         
         # Canais
         self.donor_channel = -1002877945842
