@@ -1,24 +1,24 @@
 """
-bot_forwarder.py
-Bot Telegram que lê mídias de um canal (como admin) e repassa para outro grupo.
-Versão atualizada para python-telegram-bot 21.0+
+bot_forwarder_webhook.py
+Bot Telegram que monitora um canal via webhook e repassa mídias automaticamente.
 """
 
 import os
-import random
 import logging
 import asyncio
-from telegram import Bot
-from telegram.error import TelegramError
+from telegram import Bot, Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from datetime import datetime
 import pytz
+import json
 
 # =================== CONFIGURAÇÕES ===================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Token do BotFather
-SOURCE_CHANNEL_ID = os.getenv("SOURCE_CHANNEL_ID")  # Canal de origem (bot deve ser admin)
-DESTINATION_CHANNEL_ID = os.getenv("DESTINATION_CHANNEL_ID")  # Canal/grupo de destino
-INTERVAL_HOURS = float(os.getenv("INTERVAL_HOURS", "2"))  # Intervalo entre envios
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "-1003106957508"))
+DESTINATION_CHANNEL_ID = int(os.getenv("DESTINATION_CHANNEL_ID", "-1003135697010"))
+INTERVAL_HOURS = float(os.getenv("INTERVAL_HOURS", "2"))
 TIMEZONE = pytz.timezone(os.getenv("TZ", "America/Sao_Paulo"))
+PORT = int(os.getenv("PORT", "8080"))
 
 # =================== LOGGING ===================
 logging.basicConfig(
@@ -27,44 +27,35 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+# =================== ARMAZENAMENTO ===================
+# Arquivo para armazenar mensagens processadas
+PROCESSED_MESSAGES_FILE = "processed_messages.json"
+
+def load_processed_messages():
+    """Carrega as mensagens já processadas do arquivo."""
+    try:
+        if os.path.exists(PROCESSED_MESSAGES_FILE):
+            with open(PROCESSED_MESSAGES_FILE, 'r') as f:
+                return set(json.load(f))
+    except Exception as e:
+        logging.error(f"❌ Erro ao carregar mensagens processadas: {e}")
+    return set()
+
+def save_processed_messages(messages):
+    """Salva as mensagens processadas no arquivo."""
+    try:
+        with open(PROCESSED_MESSAGES_FILE, 'w') as f:
+            json.dump(list(messages), f)
+    except Exception as e:
+        logging.error(f"❌ Erro ao salvar mensagens processadas: {e}")
+
+# Conjunto de mensagens já processadas
+processed_messages = load_processed_messages()
+
 # =================== FUNÇÕES ===================
 
 def now_str():
     return datetime.now(TIMEZONE).strftime("%d/%m/%Y %H:%M:%S")
-
-async def get_channel_media_messages(bot, channel_id, limit=100):
-    """Obtém as mensagens com mídia do canal de origem."""
-    try:
-        messages = []
-        # Usando get_updates ou webhook para obter mensagens mais recentes
-        # Alternativa: usar get_chat_member para verificar permissões primeiro
-        async with bot:
-            # Primeiro verifica se o bot tem acesso ao canal
-            try:
-                await bot.get_chat(chat_id=channel_id)
-            except TelegramError as e:
-                logging.error(f"❌ Bot não tem acesso ao canal {channel_id}: {e}")
-                return []
-            
-            # Para versões mais recentes, podemos tentar diferentes abordagens
-            try:
-                # Método para versões 20.0+
-                async for message in bot.get_chat_history(chat_id=channel_id, limit=limit):
-                    if has_media(message):
-                        messages.append(message)
-            except AttributeError:
-                # Fallback para versões mais antigas
-                logging.warning("⚠️ Método get_chat_history não disponível. Usando abordagem alternativa...")
-                messages = await get_media_messages_alternative(bot, channel_id, limit)
-        
-        logging.info(f"📥 Encontradas {len(messages)} mensagens com mídia no canal de origem")
-        return messages
-    except TelegramError as e:
-        logging.error(f"❌ Erro ao acessar canal de origem {channel_id}: {e}")
-        return []
-    except Exception as e:
-        logging.error(f"💥 Erro inesperado ao ler canal: {e}")
-        return []
 
 def has_media(message):
     """Verifica se a mensagem contém mídia."""
@@ -72,25 +63,35 @@ def has_media(message):
             message.document or message.animation or message.voice or
             message.sticker)
 
-async def get_media_messages_alternative(bot, channel_id, limit=50):
-    """Abordagem alternativa para obter mensagens com mídia."""
+async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa mensagens recebidas no canal de origem."""
     try:
-        # Esta é uma abordagem simplificada - na prática você precisaria
-        # armazenar as mensagens que já processou
-        messages = []
+        message = update.effective_message
         
-        # Para um bot real, você precisaria usar webhooks ou armazenar
-        # o estado das mensagens já processadas
-        logging.info("🔍 Buscando mensagens recentes...")
+        # Verifica se a mensagem é do canal de origem
+        if message.chat.id != SOURCE_CHANNEL_ID:
+            return
         
-        # Como fallback, vamos simular algumas mensagens de exemplo
-        # EM PRODUÇÃO: você precisaria implementar lógica de webhook
-        # ou usar uma abordagem diferente para monitorar o canal
+        # Verifica se já processou esta mensagem
+        if message.message_id in processed_messages:
+            return
         
-        return messages
+        # Verifica se tem mídia
+        if has_media(message):
+            logging.info(f"📥 Nova mídia detectada: ID {message.message_id}")
+            
+            # Adiciona à fila para processamento posterior
+            if 'media_queue' not in context.bot_data:
+                context.bot_data['media_queue'] = []
+            
+            context.bot_data['media_queue'].append(message)
+            processed_messages.add(message.message_id)
+            save_processed_messages(processed_messages)
+            
+            logging.info(f"✅ Mídia {message.message_id} adicionada à fila. Fila: {len(context.bot_data['media_queue'])}")
+            
     except Exception as e:
-        logging.error(f"❌ Erro na abordagem alternativa: {e}")
-        return []
+        logging.error(f"💥 Erro ao processar mensagem: {e}")
 
 async def forward_media_message(bot, source_message, destination_chat_id):
     """Encaminha uma mensagem de mídia para o canal de destino."""
@@ -102,11 +103,8 @@ async def forward_media_message(bot, source_message, destination_chat_id):
         )
         logging.info(f"✅ Encaminhado para {destination_chat_id}: ID {source_message.message_id}")
         return True
-    except TelegramError as e:
-        logging.error(f"❌ Falha ao encaminhar mensagem {source_message.message_id}: {e}")
-        return False
     except Exception as e:
-        logging.error(f"💥 Erro inesperado ao encaminhar: {e}")
+        logging.error(f"❌ Falha ao encaminhar mensagem {source_message.message_id}: {e}")
         return False
 
 async def copy_media_message(bot, source_message, destination_chat_id):
@@ -138,7 +136,7 @@ async def copy_media_message(bot, source_message, destination_chat_id):
                 document=source_message.document.file_id,
                 caption=caption
             )
-        elif source_message.animation:  # GIFs
+        elif source_message.animation:
             await bot.send_animation(
                 chat_id=destination_chat_id,
                 animation=source_message.animation.file_id,
@@ -158,89 +156,113 @@ async def copy_media_message(bot, source_message, destination_chat_id):
         
         logging.info(f"✅ Copiado para {destination_chat_id}: ID {source_message.message_id}")
         return True
-    except TelegramError as e:
+    except Exception as e:
         logging.error(f"❌ Falha ao copiar mensagem {source_message.message_id}: {e}")
         return False
-    except Exception as e:
-        logging.error(f"💥 Erro inesperado ao copiar: {e}")
-        return False
 
-async def main_loop():
-    """Loop principal: lê mídias do canal e repassa a cada X horas."""
-    if not BOT_TOKEN:
-        logging.error("❌ BOT_TOKEN não definido. Configure-o nas variáveis de ambiente.")
-        return
-
-    if not SOURCE_CHANNEL_ID or not DESTINATION_CHANNEL_ID:
-        logging.error("❌ Configure SOURCE_CHANNEL_ID e DESTINATION_CHANNEL_ID no Railway.")
-        return
-
+async def scheduled_forwarder(context: ContextTypes.DEFAULT_TYPE):
+    """Tarefa agendada que envia mídias da fila a cada X horas."""
     try:
-        source_id = int(SOURCE_CHANNEL_ID)
-        dest_id = int(DESTINATION_CHANNEL_ID)
-    except ValueError:
-        logging.error("❌ IDs dos canais devem ser números inteiros")
+        bot = context.bot
+        
+        if 'media_queue' not in context.bot_data or not context.bot_data['media_queue']:
+            logging.info("⏳ Nenhuma mídia na fila para enviar...")
+            return
+        
+        # Pega a mídia mais antiga da fila
+        message_to_send = context.bot_data['media_queue'].pop(0)
+        
+        logging.info(f"🔄 Processando mídia da fila: ID {message_to_send.message_id}")
+        
+        # Tenta encaminhar
+        success = await forward_media_message(bot, message_to_send, DESTINATION_CHANNEL_ID)
+        
+        # Se falhar, tenta copiar
+        if not success:
+            logging.info("🔄 Tentando copiar em vez de encaminhar...")
+            success = await copy_media_message(bot, message_to_send, DESTINATION_CHANNEL_ID)
+        
+        if success:
+            logging.info(f"✅ Mídia {message_to_send.message_id} enviada com sucesso")
+        else:
+            # Se falhou, recoloca na fila
+            context.bot_data['media_queue'].insert(0, message_to_send)
+            logging.error(f"❌ Falha ao processar mídia {message_to_send.message_id}")
+        
+        logging.info(f"📊 Fila restante: {len(context.bot_data['media_queue'])} mídias")
+        
+    except Exception as e:
+        logging.error(f"💥 Erro no agendador: {e}")
+
+async def initialize_bot():
+    """Inicializa o bot e configura o webhook."""
+    try:
+        # Cria a application
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Adiciona handler para mensagens do canal
+        application.add_handler(
+            MessageHandler(
+                filters.Chat(chat_id=SOURCE_CHANNEL_ID) & 
+                (filters.PHOTO | filters.VIDEO | filters.AUDIO | 
+                 filters.DOCUMENT | filters.ANIMATION | filters.VOICE | 
+                 filters.STICKER),
+                handle_channel_message
+            )
+        )
+        
+        # Agenda o envio periódico
+        job_queue = application.job_queue
+        job_queue.run_repeating(
+            scheduled_forwarder,
+            interval=INTERVAL_HOURS * 3600,
+            first=10  # Primeira execução em 10 segundos
+        )
+        
+        # Configura webhook (para Railway)
+        webhook_url = os.getenv("RAILWAY_STATIC_URL")
+        if webhook_url:
+            await application.bot.set_webhook(f"{webhook_url}/webhook")
+            logging.info(f"🌐 Webhook configurado: {webhook_url}")
+        else:
+            # Se não tem webhook URL, usa polling (para desenvolvimento)
+            logging.info("🔍 Usando polling...")
+            await application.initialize()
+            await application.start()
+            await application.updater.start_polling()
+        
+        logging.info("🤖 BOT INICIADO com sucesso!")
+        logging.info(f"📥 Monitorando canal: {SOURCE_CHANNEL_ID}")
+        logging.info(f"📤 Enviando para: {DESTINATION_CHANNEL_ID}")
+        logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS} horas")
+        logging.info(f"📊 Mensagens processadas: {len(processed_messages)}")
+        
+        return application
+        
+    except Exception as e:
+        logging.error(f"💥 Erro ao inicializar bot: {e}")
+        return None
+
+async def main():
+    """Função principal."""
+    if not BOT_TOKEN:
+        logging.error("❌ BOT_TOKEN não definido")
         return
-
-    bot = Bot(token=BOT_TOKEN)
     
-    # Cache de mensagens já encaminhadas
-    forwarded_messages = set()
+    application = await initialize_bot()
     
-    logging.info("🤖 BOT INICIADO com sucesso!")
-    logging.info(f"📥 Lendo do canal: {SOURCE_CHANNEL_ID}")
-    logging.info(f"📤 Enviando para: {DESTINATION_CHANNEL_ID}")
-    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS} horas")
-
-    while True:
+    if application:
         try:
-            # Busca mensagens com mídia do canal de origem
-            media_messages = await get_channel_media_messages(bot, source_id, limit=50)
-            
-            if not media_messages:
-                logging.warning("⏳ Nenhuma mídia encontrada no canal de origem...")
-                await asyncio.sleep(600)  # espera 10 min
-                continue
-
-            # Filtra mensagens que ainda não foram encaminhadas
-            new_messages = [msg for msg in media_messages if msg.message_id not in forwarded_messages]
-            
-            if not new_messages:
-                logging.info("🔄 Todas as mídias já foram encaminhadas. Buscando novas...")
-                # Limpa cache parcialmente para evitar crescimento infinito
-                if len(forwarded_messages) > 100:
-                    forwarded_messages.clear()
-                await asyncio.sleep(600)
-                continue
-
-            # Escolhe uma mídia aleatória das novas
-            message_to_forward = random.choice(new_messages)
-            
-            # Tenta encaminhar primeiro (preserva o conteúdo original)
-            success = await forward_media_message(bot, message_to_forward, dest_id)
-            
-            # Se falhar, tenta copiar
-            if not success:
-                logging.info("🔄 Tentando copiar em vez de encaminhar...")
-                success = await copy_media_message(bot, message_to_forward, dest_id)
-            
-            if success:
-                forwarded_messages.add(message_to_forward.message_id)
-                logging.info(f"✅ Mídia {message_to_forward.message_id} processada com sucesso")
-            else:
-                logging.error(f"❌ Falha ao processar mídia {message_to_forward.message_id}")
-
-            logging.info(f"🕒 Próximo envio em {INTERVAL_HOURS:.1f} horas...\n")
-            await asyncio.sleep(INTERVAL_HOURS * 3600)
-
-        except Exception as e:
-            logging.error(f"💥 Erro no loop principal: {e}")
-            await asyncio.sleep(300)  # espera 5 min antes de tentar novamente
+            # Mantém o bot rodando
+            await asyncio.Future()  # roda forever
+        except KeyboardInterrupt:
+            logging.info("🛑 Bot interrompido manualmente")
+        finally:
+            if application.running:
+                await application.stop()
+                await application.shutdown()
 
 # =================== EXECUÇÃO ===================
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_loop())
-    except KeyboardInterrupt:
-        logging.info("🛑 Bot interrompido manualmente.")
+    asyncio.run(main())
