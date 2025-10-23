@@ -6,9 +6,32 @@ import base64
 from telethon import TelegramClient, errors
 from datetime import datetime, timedelta
 import pytz
+from flask import Flask
+from threading import Thread
+import warnings
+
+# Suprime warnings do Flask
+warnings.filterwarnings("ignore", category=UserWarning)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Servidor de Health Check
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return 'OK', 200
+
+@app.route('/health')
+def health():
+    return 'OK', 200
+
+def run_health_server():
+    """Executa o servidor de health check em porta separada"""
+    port = int(os.getenv('PORT', 8000))
+    logger.info(f"🩺 Servidor de health check iniciado na porta {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 class SessionManager:
     @staticmethod
@@ -232,6 +255,14 @@ class TelegramRepostBot:
                 await asyncio.sleep(300)
 
 async def main():
+    # Inicia o servidor de health check em thread separada
+    health_thread = Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    
+    # Aguarda um pouco para o servidor iniciar
+    await asyncio.sleep(2)
+    
+    # Inicia o bot
     bot = TelegramRepostBot()
     await bot.run()
 
