@@ -49,6 +49,20 @@ class SessionManager:
                 logger.error(f"❌ Erro ao carregar sessão: {e}")
         return False
 
+    @staticmethod
+    def save_session_to_env():
+        """Salva a sessão atual de volta para o environment (para copiar manualmente)"""
+        try:
+            if os.path.exists('koyeb_session.session'):
+                with open('koyeb_session.session', 'rb') as f:
+                    session_data = base64.b64encode(f.read()).decode('utf-8')
+                logger.info("📋 SESSAO ATUAL (COPIAR PARA KOYEB):")
+                logger.info(f"SESSION_DATA={session_data}")
+                return session_data
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar sessão: {e}")
+        return None
+
 class TelegramRepostBot:
     def __init__(self):
         # Carrega sessão primeiro
@@ -57,7 +71,6 @@ class TelegramRepostBot:
         self.api_id = 26949670
         self.api_hash = 'fcb4ebdda2cc008abb37ad9fd9ce3c3a'
         self.phone = '+5511960188559'
-        self.password = 'Isadora44'
         
         self.donor_channel = -1003106957508  # Canal de origem
         self.target_channel = -1003135697010  # Canal de destino
@@ -70,13 +83,13 @@ class TelegramRepostBot:
         self.sent_messages = set()
 
     async def connect(self):
-        """Conecta usando sessão existente"""
+        """Conecta usando sessão existente ou cria nova"""
         try:
             await self.client.connect()
             
             if not await self.client.is_user_authorized():
-                logger.error("❌ Sessão inválida ou expirada")
-                return False
+                logger.warning("🔑 Sessão expirada. Iniciando login...")
+                return await self.login()
                 
             logger.info("✅ Conectado com sessão existente!")
             me = await self.client.get_me()
@@ -87,16 +100,44 @@ class TelegramRepostBot:
             logger.error(f"❌ Erro de conexão: {e}")
             return False
 
+    async def login(self):
+        """Faz login manualmente"""
+        try:
+            logger.info("📱 Iniciando processo de login...")
+            
+            # Envia código de verificação
+            await self.client.send_code_request(self.phone)
+            
+            # Em ambiente local você pediria o código, mas no Koyeb precisamos de uma abordagem diferente
+            logger.error("🚫 Login manual necessário. Execute localmente para gerar nova sessão.")
+            
+            # Salva sessão vazia para evitar loop
+            self.client.session.save()
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Erro no login: {e}")
+            return False
+
+    async def test_connection(self):
+        """Testa se a conexão está funcionando"""
+        try:
+            me = await self.client.get_me()
+            if me:
+                logger.info(f"✅ Conexão teste OK: {me.first_name}")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Teste de conexão falhou: {e}")
+        return False
+
     def is_media_message(self, message):
         """Verifica se a mensagem contém mídia"""
         if not message:
             return False
         
-        # Verifica se tem mídia
         if hasattr(message, 'media') and message.media:
             return True
         
-        # Verifica tipos específicos de mídia
         if (hasattr(message, 'photo') and message.photo or
             hasattr(message, 'video') and message.video or
             hasattr(message, 'document') and message.document or
@@ -127,7 +168,6 @@ class TelegramRepostBot:
     async def download_and_send_media(self, message):
         """Baixa e reenvia a mídia (sem forward)"""
         try:
-            # Baixa a mídia
             file_path = await message.download_media()
             
             if not file_path:
@@ -135,42 +175,12 @@ class TelegramRepostBot:
                 return False
             
             # Envia a mídia como nova mensagem
-            if message.photo:
-                # É uma foto
-                await self.client.send_file(
-                    self.target_channel,
-                    file_path,
-                    caption=""
-                )
-            elif message.video:
-                # É um vídeo
-                await self.client.send_file(
-                    self.target_channel,
-                    file_path,
-                    caption="",
-                    supports_streaming=True
-                )
-            elif message.document:
-                # É um documento
-                await self.client.send_file(
-                    self.target_channel,
-                    file_path,
-                    caption=""
-                )
-            elif message.sticker:
-                # É um sticker
-                await self.client.send_file(
-                    self.target_channel,
-                    file_path,
-                    caption=""
-                )
-            else:
-                # Outro tipo de mídia
-                await self.client.send_file(
-                    self.target_channel,
-                    file_path,
-                    caption=""
-                )
+            await self.client.send_file(
+                self.target_channel,
+                file_path,
+                caption="",
+                supports_streaming=True
+            )
             
             # Limpa o arquivo baixado
             if os.path.exists(file_path):
@@ -180,7 +190,6 @@ class TelegramRepostBot:
             
         except Exception as e:
             logger.error(f"❌ Erro ao processar mídia: {e}")
-            # Limpa o arquivo em caso de erro
             if 'file_path' in locals() and os.path.exists(file_path):
                 os.remove(file_path)
             return False
@@ -198,13 +207,11 @@ class TelegramRepostBot:
                 logger.warning("📭 Nenhuma mídia disponível")
                 return False
 
-        # Seleciona mídia aleatória
         message, msg_id = random.choice(available_media)
         
         try:
             logger.info(f"📤 Enviando mídia ID {message.id} (sem forward)...")
             
-            # Envia a mídia como nova mensagem (não encaminha)
             success = await self.download_and_send_media(message)
             
             if success:
@@ -225,21 +232,26 @@ class TelegramRepostBot:
             return False
 
     async def run(self):
-        """Loop principal - mídias como novas mensagens"""
+        """Loop principal"""
         logger.info("🚀 Iniciando Bot - Apenas Mídias (Sem Forward)")
         
         if not await self.connect():
-            logger.error("❌ Falha na conexão")
+            logger.error("❌ Falha na conexão - Sessão expirada")
+            # Salva a sessão atual (pode estar vazia)
+            SessionManager.save_session_to_env()
+            return
+
+        # Testa a conexão
+        if not await self.test_connection():
+            logger.error("❌ Teste de conexão falhou")
             return
 
         logger.info("🎯 Bot rodando! Mídias serão enviadas como novas mensagens")
         
         while True:
             try:
-                # Envia uma mídia
                 success = await self.send_random_media()
                 
-                # Calcula próximo intervalo
                 wait_time = random.randint(self.min_interval, self.max_interval)
                 next_time = datetime.now(self.timezone) + timedelta(seconds=wait_time)
                 
