@@ -21,84 +21,46 @@ logging.basicConfig(
 )
 
 # =================== VARIÁVEIS GLOBAIS ===================
-media_messages = []  # Armazena TODAS as mídias do canal
-sent_messages = set()  # IDs das mensagens já enviadas
+sent_messages = set()
 
 # =================== FUNÇÕES ===================
 
-async def get_all_media_messages(bot):
-    """Busca TODAS as mensagens com mídia do canal."""
+async def get_recent_media_messages(bot):
+    """Busca mídias recentes usando métodos básicos."""
     try:
-        logging.info("🔍 Buscando TODAS as mídias do canal...")
+        logging.info("🔍 Procurando mídias recentes...")
         
-        all_messages = []
-        offset_id = None
-        batch_count = 0
+        # Vamos tentar acessar algumas mensagens específicas
+        # Começando da mensagem mais recente para trás
+        media_messages = []
+        current_id = 1  # Começa do ID 1
         
-        while True:
+        for i in range(500):  # Tenta até 500 mensagens
             try:
-                # Busca um lote de mensagens
-                messages = await bot.get_chat_history(
-                    chat_id=SOURCE_CHANNEL_ID,
-                    limit=100,  # 100 mensagens por vez
-                    offset_id=offset_id
+                message = await bot.get_message(
+                    chat_id=SOURCE_CHANNEL_ID, 
+                    message_id=current_id
                 )
                 
-                if not messages:
-                    break
+                # Verifica se tem mídia
+                if (message.photo or message.video or message.audio or 
+                    message.document or message.animation or message.sticker or
+                    message.voice):
+                    media_messages.append(message)
+                    logging.info(f"✅ Encontrada mídia ID {current_id}")
                 
-                # Filtra apenas mensagens com mídia
-                for message in messages:
-                    if (message.photo or message.video or message.audio or 
-                        message.document or message.animation or message.sticker or
-                        message.voice):
-                        all_messages.append(message)
+                current_id += 1
                 
-                batch_count += 1
-                logging.info(f"📦 Lote {batch_count}: +{len(messages)} mensagens ({len(all_messages)} mídias totais)")
-                
-                # Atualiza o offset para a próxima página
-                offset_id = messages[-1].message_id
-                
-                # Para após 10 lotes (1000 mensagens) ou quando não há mais mensagens
-                if batch_count >= 10 or len(messages) < 100:
-                    break
-                    
-            except Exception as e:
-                logging.error(f"❌ Erro no lote {batch_count}: {e}")
-                break
+            except Exception:
+                # Se não encontrar a mensagem, continua para a próxima
+                current_id += 1
+                continue
         
-        logging.info(f"✅ Total de mídias encontradas: {len(all_messages)}")
-        return all_messages
+        logging.info(f"📊 Total de mídias encontradas: {len(media_messages)}")
+        return media_messages
         
     except Exception as e:
-        logging.error(f"💥 Erro ao buscar mídias: {e}")
-        return []
-
-async def get_media_messages_simple(bot):
-    """Busca mídias de forma mais simples (fallback)."""
-    try:
-        logging.info("🔍 Buscando mídias recentes...")
-        messages = []
-        
-        # Busca as últimas 500 mensagens
-        recent_messages = await bot.get_chat_history(
-            chat_id=SOURCE_CHANNEL_ID,
-            limit=500
-        )
-        
-        # Filtra apenas mensagens com mídia
-        for message in recent_messages:
-            if (message.photo or message.video or message.audio or 
-                message.document or message.animation or message.sticker or
-                message.voice):
-                messages.append(message)
-        
-        logging.info(f"✅ Encontradas {len(messages)} mídias recentes")
-        return messages
-        
-    except Exception as e:
-        logging.error(f"❌ Erro simples: {e}")
+        logging.error(f"❌ Erro ao buscar mídias: {e}")
         return []
 
 async def send_media_clean(bot, message):
@@ -175,8 +137,6 @@ async def test_bot_access(bot):
 
 async def main_loop():
     """Loop principal do bot."""
-    global media_messages
-    
     if not BOT_TOKEN:
         logging.error("❌ BOT_TOKEN não configurado")
         return
@@ -187,29 +147,21 @@ async def main_loop():
     if not await test_bot_access(bot):
         return
     
-    # Busca TODAS as mídias do canal
-    logging.info("🔄 Carregando mídias do canal...")
-    media_messages = await get_all_media_messages(bot)
-    
-    # Se não conseguiu, tenta método simples
-    if not media_messages:
-        logging.info("🔄 Tentando método simples...")
-        media_messages = await get_media_messages_simple(bot)
+    # Busca mídias do canal
+    logging.info("🔄 Buscando mídias no canal...")
+    media_messages = await get_recent_media_messages(bot)
     
     if not media_messages:
-        logging.error("❌ Não foi possível carregar mídias do canal")
-        logging.error("💡 Verifique se:")
-        logging.error("   - O bot é ADMIN no canal de origem")
-        logging.error("   - O bot tem permissão para ver mensagens")
-        logging.error("   - Existem mídias no canal")
+        logging.error("❌ Nenhuma mídia encontrada")
+        logging.info("💡 Vamos tentar uma abordagem diferente...")
+        logging.info("📝 Envie uma mensagem no canal e note o ID")
         return
     
-    logging.info("🤖 BOT INICIADO COM SUCESSO!")
-    logging.info(f"📥 Canal de origem: {SOURCE_CHANNEL_ID}")
-    logging.info(f"📤 Canal de destino: {DESTINATION_CHANNEL_ID}")
-    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS} horas")
-    logging.info(f"📊 Total de mídias: {len(media_messages)}")
-    logging.info("🎯 Modo: Mídia nova (sem forward/legenda)")
+    logging.info("🤖 BOT INICIADO!")
+    logging.info(f"📥 Origem: {SOURCE_CHANNEL_ID}")
+    logging.info(f"📤 Destino: {DESTINATION_CHANNEL_ID}")
+    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS}h")
+    logging.info(f"📊 Mídias: {len(media_messages)}")
     
     sent_count = 0
     
@@ -220,7 +172,7 @@ async def main_loop():
             
             # Se todas foram enviadas, reinicia
             if not available_messages:
-                logging.info("🔄 Todas as mídias foram enviadas. Reiniciando ciclo...")
+                logging.info("🔄 Todas as mídias enviadas. Reiniciando...")
                 sent_messages.clear()
                 available_messages = media_messages
             
@@ -234,17 +186,16 @@ async def main_loop():
             if success:
                 sent_messages.add(selected_message.message_id)
                 sent_count += 1
-                logging.info(f"📈 Total enviadas: {sent_count}/{len(media_messages)}")
+                logging.info(f"📈 Enviadas: {sent_count}")
             else:
                 logging.error("❌ Falha ao enviar mídia")
             
             # Aguarda intervalo
-            logging.info(f"⏳ Próxima mídia em {INTERVAL_HOURS} horas...")
+            logging.info(f"⏳ Próxima em {INTERVAL_HOURS} horas...")
             await asyncio.sleep(INTERVAL_HOURS * 3600)
             
         except Exception as e:
-            logging.error(f"💥 Erro no loop principal: {e}")
-            logging.info("🔄 Tentando novamente em 5 minutos...")
+            logging.error(f"💥 Erro: {e}")
             await asyncio.sleep(300)
 
 # =================== EXECUÇÃO ===================
@@ -253,4 +204,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        logging.info("🛑 Bot interrompido manualmente")
+        logging.info("🛑 Bot interrompido")
