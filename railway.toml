@@ -1,0 +1,9 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python repost.py"
+
+[[services]]
+name = "repost-bot"
+startCommand = "python repost.py"
