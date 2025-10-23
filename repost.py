@@ -1,17 +1,15 @@
 import asyncio
 import os
-import random
 import logging
-from telegram import Bot
-from datetime import datetime
-import pytz
+import json
+from telegram import Bot, Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # =================== CONFIGURAÇÕES ===================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SOURCE_CHANNEL_ID = -1003106957508
 DESTINATION_CHANNEL_ID = -1003135697010
 INTERVAL_HOURS = 2
-TIMEZONE = pytz.timezone('America/Sao_Paulo')
 
 # =================== LOGGING ===================
 logging.basicConfig(
@@ -20,188 +18,195 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-# =================== VARIÁVEIS GLOBAIS ===================
-sent_messages = set()
+# =================== ARMAZENAMENTO ===================
+MEDIA_QUEUE_FILE = "media_queue.json"
+
+def load_media_queue():
+    """Carrega a fila de mídias do arquivo."""
+    try:
+        if os.path.exists(MEDIA_QUEUE_FILE):
+            with open(MEDIA_QUEUE_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logging.error(f"❌ Erro ao carregar fila: {e}")
+    return []
+
+def save_media_queue(queue):
+    """Salva a fila de mídias no arquivo."""
+    try:
+        with open(MEDIA_QUEUE_FILE, 'w') as f:
+            json.dump(queue, f)
+    except Exception as e:
+        logging.error(f"❌ Erro ao salvar fila: {e}")
 
 # =================== FUNÇÕES ===================
 
-async def get_recent_media_messages(bot):
-    """Busca mídias recentes usando métodos básicos."""
+async def handle_new_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Captura novas mensagens do canal de origem."""
     try:
-        logging.info("🔍 Procurando mídias recentes...")
+        message = update.effective_message
         
-        # Vamos tentar acessar algumas mensagens específicas
-        # Começando da mensagem mais recente para trás
-        media_messages = []
-        current_id = 1  # Começa do ID 1
+        # Verifica se é do canal de origem
+        if message.chat.id != SOURCE_CHANNEL_ID:
+            return
         
-        for i in range(500):  # Tenta até 500 mensagens
+        # Verifica se tem mídia
+        has_media = (message.photo or message.video or message.audio or 
+                    message.document or message.animation or message.sticker or
+                    message.voice)
+        
+        if has_media:
+            # Adiciona à fila
+            queue = load_media_queue()
+            queue.append({
+                'message_id': message.message_id,
+                'chat_id': message.chat.id,
+                'timestamp': message.date.isoformat() if message.date else None
+            })
+            save_media_queue(queue)
+            
+            logging.info(f"📥 Nova mídia adicionada à fila: ID {message.message_id}")
+            logging.info(f"📊 Fila atual: {len(queue)} mídias")
+            
+    except Exception as e:
+        logging.error(f"💥 Erro ao processar mensagem: {e}")
+
+async def send_from_queue(context: ContextTypes.DEFAULT_TYPE):
+    """Envia uma mídia da fila a cada 2 horas."""
+    try:
+        bot = context.bot
+        queue = load_media_queue()
+        
+        if not queue:
+            logging.info("⏳ Nenhuma mídia na fila...")
+            return
+        
+        # Pega a mídia mais antiga
+        media_info = queue.pop(0)
+        message_id = media_info['message_id']
+        
+        logging.info(f"📤 Enviando mídia da fila: ID {message_id}")
+        
+        # Tenta encaminhar
+        try:
+            await bot.forward_message(
+                chat_id=DESTINATION_CHANNEL_ID,
+                from_chat_id=SOURCE_CHANNEL_ID,
+                message_id=message_id
+            )
+            logging.info(f"✅ Mídia {message_id} encaminhada com sucesso")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro ao encaminhar {message_id}: {e}")
+            # Se falhar, recoloca na fila
+            queue.insert(0, media_info)
+        
+        # Salva a fila atualizada
+        save_media_queue(queue)
+        logging.info(f"📊 Fila restante: {len(queue)} mídias")
+        
+    except Exception as e:
+        logging.error(f"💥 Erro no agendador: {e}")
+
+async def initialize_existing_media(bot):
+    """Tenta carregar mídias existentes do canal (apenas para novas instalações)."""
+    try:
+        queue = load_media_queue()
+        
+        # Se já tem mídias na fila, não precisa recarregar
+        if queue:
+            logging.info(f"📊 Fila existente carregada: {len(queue)} mídias")
+            return
+        
+        logging.info("🔍 Tentando carregar mídias existentes...")
+        
+        # Esta é uma abordagem limitada - funciona apenas para mensagens recentes
+        # Em produção, você precisaria de uma forma mais robusta
+        
+        # Vamos tentar acessar algumas mensagens recentes
+        for offset in range(1, 100):  # Tenta IDs de 1 a 100
             try:
                 message = await bot.get_message(
-                    chat_id=SOURCE_CHANNEL_ID, 
-                    message_id=current_id
+                    chat_id=SOURCE_CHANNEL_ID,
+                    message_id=offset
                 )
                 
-                # Verifica se tem mídia
                 if (message.photo or message.video or message.audio or 
-                    message.document or message.animation or message.sticker or
-                    message.voice):
-                    media_messages.append(message)
-                    logging.info(f"✅ Encontrada mídia ID {current_id}")
-                
-                current_id += 1
-                
+                    message.document or message.animation or message.sticker):
+                    
+                    queue.append({
+                        'message_id': message.message_id,
+                        'chat_id': message.chat.id,
+                        'timestamp': message.date.isoformat() if message.date else None
+                    })
+                    logging.info(f"✅ Mídia existente encontrada: ID {message.message_id}")
+                    
             except Exception:
-                # Se não encontrar a mensagem, continua para a próxima
-                current_id += 1
+                # Mensagem não existe, continua para a próxima
                 continue
         
-        logging.info(f"📊 Total de mídias encontradas: {len(media_messages)}")
-        return media_messages
-        
+        if queue:
+            save_media_queue(queue)
+            logging.info(f"📥 {len(queue)} mídias existentes adicionadas à fila")
+        else:
+            logging.info("📝 Aguardando novas mídias...")
+            
     except Exception as e:
-        logging.error(f"❌ Erro ao buscar mídias: {e}")
-        return []
+        logging.error(f"❌ Erro ao carregar mídias existentes: {e}")
 
-async def send_media_clean(bot, message):
-    """Envia mídia sem forward e sem legenda."""
-    try:
-        # Envia como nova mídia baseada no tipo
-        if message.photo:
-            await bot.send_photo(
-                chat_id=DESTINATION_CHANNEL_ID,
-                photo=message.photo[-1].file_id,
-                caption=None
-            )
-        elif message.video:
-            await bot.send_video(
-                chat_id=DESTINATION_CHANNEL_ID,
-                video=message.video.file_id,
-                caption=None
-            )
-        elif message.document:
-            await bot.send_document(
-                chat_id=DESTINATION_CHANNEL_ID,
-                document=message.document.file_id,
-                caption=None
-            )
-        elif message.audio:
-            await bot.send_audio(
-                chat_id=DESTINATION_CHANNEL_ID,
-                audio=message.audio.file_id,
-                caption=None
-            )
-        elif message.animation:
-            await bot.send_animation(
-                chat_id=DESTINATION_CHANNEL_ID,
-                animation=message.animation.file_id,
-                caption=None
-            )
-        elif message.sticker:
-            await bot.send_sticker(
-                chat_id=DESTINATION_CHANNEL_ID,
-                sticker=message.sticker.file_id
-            )
-        elif message.voice:
-            await bot.send_voice(
-                chat_id=DESTINATION_CHANNEL_ID,
-                voice=message.voice.file_id,
-                caption=None
-            )
-        elif message.text:
-            await bot.send_message(
-                chat_id=DESTINATION_CHANNEL_ID,
-                text=message.text
-            )
-        
-        logging.info(f"✅ Mídia enviada: ID {message.message_id}")
-        return True
-        
-    except Exception as e:
-        logging.error(f"❌ Erro ao enviar mídia {message.message_id}: {e}")
-        return False
-
-async def test_bot_access(bot):
-    """Testa se o bot tem acesso aos canais."""
-    try:
-        source_chat = await bot.get_chat(chat_id=SOURCE_CHANNEL_ID)
-        dest_chat = await bot.get_chat(chat_id=DESTINATION_CHANNEL_ID)
-        
-        logging.info(f"✅ Acesso ao canal de origem: {source_chat.title}")
-        logging.info(f"✅ Acesso ao canal de destino: {dest_chat.title}")
-        return True
-        
-    except Exception as e:
-        logging.error(f"❌ Erro de acesso: {e}")
-        return False
-
-async def main_loop():
-    """Loop principal do bot."""
+async def main():
+    """Função principal."""
     if not BOT_TOKEN:
         logging.error("❌ BOT_TOKEN não configurado")
         return
     
-    bot = Bot(token=BOT_TOKEN)
+    # Cria a aplicação
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    # Testa acesso aos canais
-    if not await test_bot_access(bot):
-        return
+    # Configura o handler para novas mensagens
+    application.add_handler(
+        MessageHandler(
+            filters.Chat(chat_id=SOURCE_CHANNEL_ID) & 
+            (filters.PHOTO | filters.VIDEO | filters.AUDIO | 
+             filters.Document.ALL | filters.ANIMATION | filters.VOICE | 
+             filters.STICKER),
+            handle_new_message
+        )
+    )
     
-    # Busca mídias do canal
-    logging.info("🔄 Buscando mídias no canal...")
-    media_messages = await get_recent_media_messages(bot)
+    # Agenda o envio automático
+    job_queue = application.job_queue
+    if job_queue:
+        job_queue.run_repeating(
+            send_from_queue,
+            interval=INTERVAL_HOURS * 3600,
+            first=10  # Primeira execução em 10 segundos
+        )
     
-    if not media_messages:
-        logging.error("❌ Nenhuma mídia encontrada")
-        logging.info("💡 Vamos tentar uma abordagem diferente...")
-        logging.info("📝 Envie uma mensagem no canal e note o ID")
-        return
+    # Inicializa o bot
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
     
-    logging.info("🤖 BOT INICIADO!")
-    logging.info(f"📥 Origem: {SOURCE_CHANNEL_ID}")
-    logging.info(f"📤 Destino: {DESTINATION_CHANNEL_ID}")
-    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS}h")
-    logging.info(f"📊 Mídias: {len(media_messages)}")
+    # Tenta carregar mídias existentes
+    await initialize_existing_media(application.bot)
     
-    sent_count = 0
+    logging.info("🤖 BOT INICIADO - TOTALMENTE AUTOMATIZADO!")
+    logging.info(f"📥 Monitorando: {SOURCE_CHANNEL_ID}")
+    logging.info(f"📤 Enviando para: {DESTINATION_CHANNEL_ID}")
+    logging.info(f"⏱️ Intervalo: {INTERVAL_HOURS} horas")
+    logging.info("🎯 Modo: Captura automática + encaminhamento")
     
-    while True:
-        try:
-            # Filtra mídias não enviadas
-            available_messages = [msg for msg in media_messages if msg.message_id not in sent_messages]
-            
-            # Se todas foram enviadas, reinicia
-            if not available_messages:
-                logging.info("🔄 Todas as mídias enviadas. Reiniciando...")
-                sent_messages.clear()
-                available_messages = media_messages
-            
-            # Seleciona mídia aleatória
-            selected_message = random.choice(available_messages)
-            logging.info(f"🎲 Enviando mídia ID {selected_message.message_id}...")
-            
-            # Envia como mídia nova
-            success = await send_media_clean(bot, selected_message)
-            
-            if success:
-                sent_messages.add(selected_message.message_id)
-                sent_count += 1
-                logging.info(f"📈 Enviadas: {sent_count}")
-            else:
-                logging.error("❌ Falha ao enviar mídia")
-            
-            # Aguarda intervalo
-            logging.info(f"⏳ Próxima em {INTERVAL_HOURS} horas...")
-            await asyncio.sleep(INTERVAL_HOURS * 3600)
-            
-        except Exception as e:
-            logging.error(f"💥 Erro: {e}")
-            await asyncio.sleep(300)
-
-# =================== EXECUÇÃO ===================
-
-if __name__ == "__main__":
+    # Mantém o bot rodando
     try:
-        asyncio.run(main_loop())
+        while True:
+            await asyncio.sleep(3600)
     except KeyboardInterrupt:
         logging.info("🛑 Bot interrompido")
+    finally:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+if __name__ == "__main__":
+    asyncio.run(main())
